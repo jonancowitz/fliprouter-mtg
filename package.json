@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:seed": "tsx src/db/seed-demo.ts",
+    "catalog:sync": "tsx src/db/sync-catalog-cli.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
@@ -26,7 +27,9 @@
     "postgres": "^3.4.7",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "tailwind-merge": "^3.7.0"
+    "stream-json": "^3.9.0",
+    "tailwind-merge": "^3.7.0",
+    "unbzip2-stream": "^1.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.5",

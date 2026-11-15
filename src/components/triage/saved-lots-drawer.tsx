@@ -4,13 +4,16 @@ import {
   AlertCircle,
   Check,
   FolderOpen,
+  FolderPlus,
   Loader2,
   Receipt,
+  Search,
   Trash2,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { CollectionLotStatus } from "@/db/schema";
+import { formatCentsToUsd, parseUsdToCents } from "@/lib/routing";
 import type { SavedLotListItem } from "@/lib/triage/types";
 import { cn } from "@/lib/utils";
 import {
@@ -24,6 +27,7 @@ interface SavedLotsDrawerProps {
   onClose: () => void;
   lots: readonly SavedLotListItem[];
   activeLotId: string | null;
+  onStartNewLot: () => void;
   onLoadLot: (lotId: string) => Promise<void>;
   onUpdateSettlement: (
     lotId: string,
@@ -40,11 +44,16 @@ export function SavedLotsDrawer({
   onClose,
   lots,
   activeLotId,
+  onStartNewLot,
   onLoadLot,
   onUpdateSettlement,
   onDeleteLot,
 }: SavedLotsDrawerProps): React.ReactElement | null {
   const [busyLotId, setBusyLotId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<
+    "ALL" | CollectionLotStatus
+  >("ALL");
   const [draftStatus, setDraftStatus] = useState<
     Record<string, CollectionLotStatus>
   >({});
@@ -55,6 +64,43 @@ export function SavedLotsDrawer({
   const [errorByLotId, setErrorByLotId] = useState<
     Record<string, string | null>
   >({});
+
+  const portfolioMetrics = useMemo(() => {
+    let totalCards = 0;
+    let totalCostCents = 0n;
+    let totalEstNetCents = 0n;
+
+    for (const lot of lots) {
+      totalCards += lot.totalCards;
+      totalCostCents += parseUsdToCents(lot.purchaseCostUsd) ?? 0n;
+      const effectiveNet =
+        lot.actualRealizedPayoutUsd ?? lot.estimatedNetPayoutUsd;
+      totalEstNetCents += parseUsdToCents(effectiveNet) ?? 0n;
+    }
+
+    return {
+      totalLots: lots.length,
+      totalCards,
+      totalCostUsd: formatCentsToUsd(totalCostCents),
+      totalNetUsd: formatCentsToUsd(totalEstNetCents),
+      totalProfitUsd: formatCentsToUsd(totalEstNetCents - totalCostCents),
+    };
+  }, [lots]);
+
+  const filteredLots = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return lots.filter((lot) => {
+      if (statusFilter !== "ALL" && lot.status !== statusFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        lot.lotName.toLowerCase().includes(q) ||
+        lot.purchaseDate.toLowerCase().includes(q) ||
+        lot.status.toLowerCase().includes(q)
+      );
+    });
+  }, [lots, searchQuery, statusFilter]);
 
   if (!open) return null;
 
@@ -99,23 +145,117 @@ export function SavedLotsDrawer({
             <Receipt className="h-5 w-5 text-emerald-400" />
             <div>
               <h2 className="text-base font-semibold text-slate-100">
-                Saved Lots &amp; Schedule C COGS Ledger
+                Collections &amp; Schedule C COGS Ledger
               </h2>
               <p className="text-xs text-slate-400">
-                Persisted in PostgreSQL / PGlite (`collection_lots` +
-                cent-reconciled `lot_items`).
+                Switch between personal &amp; friend collections (`collection_lots`
+                + cent-reconciled `lot_items`).
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-lg border border-slate-800 bg-slate-950 p-2 text-slate-400 hover:text-slate-200"
-            aria-label="Close saved lots drawer"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                onStartNewLot();
+                onClose();
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25"
+            >
+              <FolderPlus className="h-3.5 w-3.5" />
+              New Collection Lot
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-lg border border-slate-800 bg-slate-950 p-2 text-slate-400 hover:text-slate-200"
+              aria-label="Close saved lots drawer"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
+
+        {/* Multi-Collection Portfolio Summary + Search/Filter */}
+        {lots.length > 0 && (
+          <div className="space-y-3 border-b border-slate-800 bg-slate-950/60 px-6 py-3.5">
+            <div className="grid grid-cols-4 gap-2 font-mono text-xs tabular-nums">
+              <div>
+                <div className="text-[10px] uppercase text-slate-500">
+                  Saved Lots
+                </div>
+                <div className="font-semibold text-slate-100">
+                  {portfolioMetrics.totalLots} ({portfolioMetrics.totalCards}{" "}
+                  cards)
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-slate-500">
+                  Total Cost
+                </div>
+                <div className="font-semibold text-slate-200">
+                  {formatUsdDisplay(portfolioMetrics.totalCostUsd)}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-slate-500">
+                  Est/Realized Net
+                </div>
+                <div className="font-semibold text-emerald-300">
+                  {formatUsdDisplay(portfolioMetrics.totalNetUsd)}
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase text-slate-500">
+                  Combined P&amp;L
+                </div>
+                <div
+                  className={cn(
+                    "font-semibold",
+                    portfolioMetrics.totalProfitUsd.startsWith("-")
+                      ? "text-rose-400"
+                      : "text-emerald-400",
+                  )}
+                >
+                  {formatUsdDisplay(portfolioMetrics.totalProfitUsd, {
+                    signed: true,
+                  })}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative flex-1">
+                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-500" />
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search collection or friend name..."
+                  aria-label="Search saved collections"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-900 py-1.5 pl-8 pr-3 text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+              <select
+                aria-label="Filter saved collections by status"
+                value={statusFilter}
+                onChange={(e) =>
+                  setStatusFilter(
+                    e.target.value as "ALL" | CollectionLotStatus,
+                  )
+                }
+                className="rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-200 focus:border-emerald-500 focus:outline-none"
+              >
+                <option value="ALL">All Statuses</option>
+                {LOT_STATUS_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
 
         <div className="flex-1 space-y-3 overflow-y-auto p-6">
           {lots.length === 0 ? (
@@ -124,12 +264,17 @@ export function SavedLotsDrawer({
                 No saved acquisition lots yet
               </p>
               <p className="mt-1 text-xs text-slate-500">
-                Click &ldquo;Save Lot&rdquo; in the top bar to persist the
-                current routed lot and proportional FMV Schedule C cost basis.
+                Click &ldquo;Save Lot&rdquo; in the top bar to persist your
+                collection or a friend&rsquo;s collection with proportional FMV
+                Schedule C cost basis.
               </p>
             </div>
+          ) : filteredLots.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-slate-800 bg-slate-950/60 p-6 text-center text-xs text-slate-400">
+              No saved collections match your search or status filter.
+            </div>
           ) : (
-            lots.map((lot) => {
+            filteredLots.map((lot) => {
               const statusMeta = getLotStatusMeta(
                 draftStatus[lot.lotId] ?? lot.status,
               );

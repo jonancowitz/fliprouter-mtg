@@ -3,7 +3,7 @@ import {
   type TriageWorkspaceInitialState,
 } from "@/components/triage/triage-workspace";
 import { getReadyDb } from "@/db";
-import { getCatalogCount } from "@/db/seed-demo";
+import { getCatalogSyncSnapshot } from "@/lib/catalog";
 import { DEMO_SCANNER_PRESETS } from "@/lib/demo/scanner-presets";
 import { ingestAndRouteScannerCsv, listPersistedLots } from "@/lib/triage";
 
@@ -11,10 +11,10 @@ export const dynamic = "force-dynamic";
 
 export default async function HomePage(): Promise<React.ReactElement> {
   const { db, mode } = await getReadyDb();
-  const catalogCount = await getCatalogCount(db);
   const defaultPreset = DEMO_SCANNER_PRESETS[0]!;
 
-  const [initialTriage, savedLots] = await Promise.all([
+  const [catalogSync, initialTriage, savedLots] = await Promise.all([
+    getCatalogSyncSnapshot(db),
     ingestAndRouteScannerCsv(db, {
       csvText: defaultPreset.csvText,
       purchaseCostUsd: defaultPreset.suggestedPurchaseCostUsd,
@@ -24,7 +24,8 @@ export default async function HomePage(): Promise<React.ReactElement> {
 
   const initialState: TriageWorkspaceInitialState = {
     dbMode: mode,
-    catalogCount,
+    catalogCount: catalogSync.catalogCount,
+    initialCatalogSync: catalogSync,
     initialPresetId: defaultPreset.id,
     initialLotName: defaultPreset.suggestedLotName,
     initialPurchaseCostUsd: defaultPreset.suggestedPurchaseCostUsd,

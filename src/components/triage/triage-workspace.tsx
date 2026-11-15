@@ -4,16 +4,22 @@ import {
   Boxes,
   Check,
   CheckCircle2,
+  CopyPlus,
   Database,
   Download,
   FolderKanban,
+  FolderPlus,
   Loader2,
   Save,
   ShieldCheck,
   TrendingUp,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AssignedBucket, CollectionLotStatus } from "@/db/schema";
+import type {
+  CatalogSyncJobSnapshot,
+  CatalogSyncMode,
+} from "@/lib/catalog";
 import {
   DEMO_SCANNER_PRESETS,
   type DemoScannerPreset,
@@ -38,6 +44,7 @@ import {
   type TriageIngestResponse,
 } from "@/lib/triage/types";
 import { cn } from "@/lib/utils";
+import { CatalogSyncBanner } from "./catalog-sync-banner";
 import { ExportDrawer } from "./export-drawer";
 import {
   formatUsdDisplay,
@@ -48,9 +55,42 @@ import { RoutingProfileControls } from "./routing-profile-controls";
 import { SavedLotsDrawer } from "./saved-lots-drawer";
 import { ScannerIngestPanel } from "./scanner-ingest-panel";
 
+export interface DetachedLotDraftState {
+  readonly activeLotId: null;
+  readonly activePresetId: null;
+  readonly activeLotStatus: CollectionLotStatus;
+  readonly lotName: string;
+  readonly purchaseCostInput: string;
+  readonly serializedInputs: SerializedRoutingCardInput[];
+  readonly diagnostics: null;
+  readonly activeBucketFilter: "ALL";
+}
+
+/**
+ * Pure helper creating a clean, detached workspace state when starting a new
+ * personal or friend collection scan so a previously loaded saved lot's
+ * `activeLotId` is never overwritten.
+ */
+export function createDetachedNewCollectionLotState(params?: {
+  suggestedName?: string;
+  defaultCostUsd?: string;
+}): DetachedLotDraftState {
+  return {
+    activeLotId: null,
+    activePresetId: null,
+    activeLotStatus: "triaged",
+    lotName: params?.suggestedName?.trim() || "New Collection Scan",
+    purchaseCostInput: params?.defaultCostUsd ?? "0.00",
+    serializedInputs: [],
+    diagnostics: null,
+    activeBucketFilter: "ALL",
+  };
+}
+
 export interface TriageWorkspaceInitialState {
   dbMode: "postgres" | "pglite";
   catalogCount: number;
+  initialCatalogSync: CatalogSyncJobSnapshot;
   initialPresetId: string;
   initialLotName: string;
   initialPurchaseCostUsd: string;
@@ -67,6 +107,13 @@ export function TriageWorkspace({
 }: {
   initial: TriageWorkspaceInitialState;
 }): React.ReactElement {
+  const lotNameInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [catalogSync, setCatalogSync] = useState<CatalogSyncJobSnapshot>(
+    initial.initialCatalogSync,
+  );
+  const [isTriggeringSync, setIsTriggeringSync] = useState(false);
+
   const [activePresetId, setActivePresetId] = useState<string | null>(
     initial.initialPresetId,
   );
@@ -107,6 +154,57 @@ export function TriageWorkspace({
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [exportDrawerOpen, setExportDrawerOpen] = useState(false);
   const [savedLotsDrawerOpen, setSavedLotsDrawerOpen] = useState(false);
+
+  // Poll `/api/catalog/sync` while a background sync is running
+  useEffect(() => {
+    if (catalogSync.state !== "running") return;
+    let cancelled = false;
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await fetch("/api/catalog/sync", { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const payload = (await res.json()) as {
+          sync?: CatalogSyncJobSnapshot;
+        };
+        if (payload.sync && !cancelled) {
+          setCatalogSync(payload.sync);
+        }
+      } catch {
+        // Transient network hiccup during poll
+      }
+    }, 1200);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [catalogSync.state]);
+
+  const handleStartCatalogSync = useCallback(async (mode: CatalogSyncMode) => {
+    setIsTriggeringSync(true);
+    setIngestError(null);
+    try {
+      const res = await fetch("/api/catalog/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      const payload = (await res.json()) as {
+        ok?: boolean;
+        sync?: CatalogSyncJobSnapshot;
+        error?: string;
+      };
+      if (!res.ok || !payload.sync) {
+        throw new Error(payload.error ?? "Failed to start catalog sync.");
+      }
+      setCatalogSync(payload.sync);
+    } catch (err) {
+      setIngestError(
+        err instanceof Error ? err.message : "Failed to start catalog sync.",
+      );
+    } finally {
+      setIsTriggeringSync(false);
+    }
+  }, []);
 
   // Hydrate SKU cache dates once per ingested lot
   const hydratedCardInputs = useMemo(
@@ -188,6 +286,25 @@ export function TriageWorkspace({
     setBuylistCashMode("best");
   }, []);
 
+  const handleStartNewCollectionLot = useCallback(() => {
+    const detached = createDetachedNewCollectionLotState();
+    setActiveLotId(detached.activeLotId);
+    setActivePresetId(detached.activePresetId);
+    setActiveLotStatus(detached.activeLotStatus);
+    setLotName(detached.lotName);
+    setPurchaseCostInput(detached.purchaseCostInput);
+    setSerializedInputs(detached.serializedInputs);
+    setDiagnostics(detached.diagnostics);
+    setActiveBucketFilter(detached.activeBucketFilter);
+    setIngestError(null);
+    setLotSaveBanner("Started new collection workspace");
+    window.setTimeout(() => setLotSaveBanner(null), 2200);
+    window.setTimeout(() => {
+      lotNameInputRef.current?.focus();
+      lotNameInputRef.current?.select();
+    }, 50);
+  }, []);
+
   const refreshSavedLots = useCallback(async () => {
     const res = await fetch("/api/lots", { cache: "no-store" });
     if (res.ok) {
@@ -230,6 +347,7 @@ export function TriageWorkspace({
         setDiagnostics(payload.diagnostics);
         setEvaluatedAtIso(payload.evaluatedAt);
         setActivePresetId(params.presetId ?? null);
+        // Always detach activeLotId on new CSV/preset ingest so a prior saved lot is never overwritten
         setActiveLotId(null);
         setActiveLotStatus("triaged");
         setActiveBucketFilter("ALL");
@@ -264,92 +382,117 @@ export function TriageWorkspace({
 
   const handleUploadCsvText = useCallback(
     async ({ csvText, filename }: { csvText: string; filename?: string }) => {
-      const cleanName = filename
+      const cleanFileStem = filename
         ? filename.replace(/\.(csv|tsv|txt)$/i, "").replace(/[-_]+/g, " ")
-        : "Uploaded Scanner Lot";
+        : null;
+      // Preserve a custom user-typed name when starting from "New Collection Lot", else derive from filename
+      const shouldUseFilename =
+        activeLotId !== null ||
+        activePresetId !== null ||
+        lotName.trim() === "" ||
+        lotName === "New Collection Scan";
       await runCsvIngest({
         csvText,
         presetId: null,
-        nextLotName: cleanName,
+        nextLotName: shouldUseFilename
+          ? (cleanFileStem ?? "Uploaded Scanner Lot")
+          : lotName,
       });
     },
-    [runCsvIngest],
+    [activeLotId, activePresetId, lotName, runCsvIngest],
   );
 
-  const handleSaveLot = useCallback(async () => {
-    if (serializedInputs.length === 0) return;
-    setIsSavingLot(true);
-    setIngestError(null);
-    try {
-      if (activeLotId) {
-        const res = await fetch(`/api/lots/${activeLotId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            lotName: lotName.trim() || "Untitled Acquisition Lot",
-            purchaseCostUsd: safePurchaseCostUsd,
-            profile,
-            buylistCashMode,
-            persistProfile: false,
-            rerouteItems: true,
-          }),
-        });
-        const data = (await res.json()) as
-          | SavedLotDetailResponse
-          | { error: string };
-        if (!res.ok || "error" in data) {
-          throw new Error(
-            "error" in data ? data.error : "Failed to update lot.",
-          );
+  const persistWorkspaceLot = useCallback(
+    async (forceCreateCopy = false) => {
+      if (serializedInputs.length === 0) return;
+      setIsSavingLot(true);
+      setIngestError(null);
+      try {
+        const cleanInputsForNewLot = forceCreateCopy
+          ? serializedInputs.map((item) => ({
+              ...item,
+              lockedAllocatedCostBasisUsd: null,
+            }))
+          : serializedInputs;
+
+        if (activeLotId && !forceCreateCopy) {
+          const res = await fetch(`/api/lots/${activeLotId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              lotName: lotName.trim() || "Untitled Acquisition Lot",
+              purchaseCostUsd: safePurchaseCostUsd,
+              profile,
+              buylistCashMode,
+              persistProfile: false,
+              rerouteItems: true,
+            }),
+          });
+          const data = (await res.json()) as
+            | SavedLotDetailResponse
+            | { error: string };
+          if (!res.ok || "error" in data) {
+            throw new Error(
+              "error" in data ? data.error : "Failed to update lot.",
+            );
+          }
+          setActiveLotStatus(data.lot.status);
+          setSerializedInputs(data.inputs);
+          setEvaluatedAtIso(data.evaluatedAt);
+          setLotSaveBanner(`Updated "${data.lot.lotName}"`);
+        } else {
+          const baseName = lotName.trim() || "Untitled Acquisition Lot";
+          const targetName =
+            forceCreateCopy && activeLotId ? `${baseName} (Copy)` : baseName;
+
+          const res = await fetch("/api/lots", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              lotName: targetName,
+              purchaseCostUsd: safePurchaseCostUsd,
+              status: "triaged",
+              inputs: cleanInputsForNewLot,
+              profile,
+              buylistCashMode,
+              persistProfile: false,
+            }),
+          });
+          const data = (await res.json()) as
+            | SavedLotDetailResponse
+            | { error: string };
+          if (!res.ok || "error" in data) {
+            throw new Error(
+              "error" in data ? data.error : "Failed to save lot.",
+            );
+          }
+          setActiveLotId(data.lot.lotId);
+          setActiveLotStatus(data.lot.status);
+          setLotName(data.lot.lotName);
+          setSerializedInputs(data.inputs);
+          setEvaluatedAtIso(data.evaluatedAt);
+          setLotSaveBanner(`Saved "${data.lot.lotName}"`);
         }
-        setActiveLotStatus(data.lot.status);
-        setSerializedInputs(data.inputs);
-        setEvaluatedAtIso(data.evaluatedAt);
-        setLotSaveBanner(`Updated "${data.lot.lotName}"`);
-      } else {
-        const res = await fetch("/api/lots", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            lotName: lotName.trim() || "Untitled Acquisition Lot",
-            purchaseCostUsd: safePurchaseCostUsd,
-            status: "triaged",
-            inputs: serializedInputs,
-            profile,
-            buylistCashMode,
-            persistProfile: false,
-          }),
-        });
-        const data = (await res.json()) as
-          | SavedLotDetailResponse
-          | { error: string };
-        if (!res.ok || "error" in data) {
-          throw new Error("error" in data ? data.error : "Failed to save lot.");
-        }
-        setActiveLotId(data.lot.lotId);
-        setActiveLotStatus(data.lot.status);
-        setSerializedInputs(data.inputs);
-        setEvaluatedAtIso(data.evaluatedAt);
-        setLotSaveBanner(`Saved "${data.lot.lotName}"`);
+        await refreshSavedLots();
+        window.setTimeout(() => setLotSaveBanner(null), 2800);
+      } catch (err) {
+        setIngestError(
+          err instanceof Error ? err.message : "Failed to save lot.",
+        );
+      } finally {
+        setIsSavingLot(false);
       }
-      await refreshSavedLots();
-      window.setTimeout(() => setLotSaveBanner(null), 2800);
-    } catch (err) {
-      setIngestError(
-        err instanceof Error ? err.message : "Failed to save lot.",
-      );
-    } finally {
-      setIsSavingLot(false);
-    }
-  }, [
-    activeLotId,
-    buylistCashMode,
-    lotName,
-    profile,
-    refreshSavedLots,
-    safePurchaseCostUsd,
-    serializedInputs,
-  ]);
+    },
+    [
+      activeLotId,
+      buylistCashMode,
+      lotName,
+      profile,
+      refreshSavedLots,
+      safePurchaseCostUsd,
+      serializedInputs,
+    ],
+  );
 
   const handleLoadSavedLot = useCallback(async (targetLotId: string) => {
     const res = await fetch(`/api/lots/${targetLotId}`, { cache: "no-store" });
@@ -474,10 +617,18 @@ export function TriageWorkspace({
                 <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-300">
                   4-PILE ROUTER
                 </span>
-                <span className="hidden items-center gap-1 rounded-md border border-slate-800 bg-slate-900 px-2 py-0.5 font-mono text-[10px] text-slate-400 md:inline-flex">
+                <span
+                  className={cn(
+                    "hidden items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[10px] md:inline-flex",
+                    catalogSync.isFullCatalog
+                      ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-300"
+                      : "border-slate-800 bg-slate-900 text-slate-400",
+                  )}
+                >
                   <Database className="h-3 w-3 text-sky-400" />
                   {initial.dbMode === "postgres" ? "PostgreSQL" : "PGlite Local"}{" "}
-                  · {initial.catalogCount} Catalog SKUs
+                  · {catalogSync.catalogCount.toLocaleString("en-US")}{" "}
+                  {catalogSync.isFullCatalog ? "MTG Printings" : "Demo SKUs"}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400">
@@ -498,6 +649,16 @@ export function TriageWorkspace({
 
             <button
               type="button"
+              onClick={handleStartNewCollectionLot}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-200 hover:border-emerald-500/40 hover:bg-slate-800"
+              title="Start a clean workspace for your next or friend's collection without overwriting a saved lot"
+            >
+              <FolderPlus className="h-3.5 w-3.5 text-emerald-400" />
+              New Collection Lot
+            </button>
+
+            <button
+              type="button"
               onClick={() => setSavedLotsDrawerOpen(true)}
               className="inline-flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-200 hover:border-slate-700 hover:bg-slate-800"
             >
@@ -508,10 +669,23 @@ export function TriageWorkspace({
               </span>
             </button>
 
+            {activeLotId && (
+              <button
+                type="button"
+                disabled={isSavingLot || serializedInputs.length === 0}
+                onClick={() => persistWorkspaceLot(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-40"
+                title="Save current workspace as a separate collection lot"
+              >
+                <CopyPlus className="h-3.5 w-3.5 text-violet-300" />
+                Save as Copy
+              </button>
+            )}
+
             <button
               type="button"
               disabled={isSavingLot || serializedInputs.length === 0}
-              onClick={handleSaveLot}
+              onClick={() => persistWorkspaceLot(false)}
               className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-500/15 px-3.5 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-40"
             >
               {isSavingLot ? (
@@ -524,8 +698,9 @@ export function TriageWorkspace({
 
             <button
               type="button"
+              disabled={serializedInputs.length === 0}
               onClick={() => setExportDrawerOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm shadow-emerald-950 hover:bg-emerald-500"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm shadow-emerald-950 hover:bg-emerald-500 disabled:opacity-40"
             >
               <Download className="h-3.5 w-3.5" />
               Export Manifests (5)
@@ -535,6 +710,14 @@ export function TriageWorkspace({
       </header>
 
       <main className="mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6">
+        {/* Local 100k+ MTG Catalog Status & 1-Click Sync Bar */}
+        <CatalogSyncBanner
+          dbMode={initial.dbMode}
+          sync={catalogSync}
+          isTriggeringSync={isTriggeringSync}
+          onStartSync={handleStartCatalogSync}
+        />
+
         {/* Acquisition Lot Header & Financial ROI Scoreboard */}
         <section className="rounded-2xl border border-slate-800/90 bg-slate-900/80 p-4 shadow-xl">
           <div className="grid gap-4 lg:grid-cols-12">
@@ -542,7 +725,7 @@ export function TriageWorkspace({
             <div className="flex flex-col justify-between gap-3 lg:col-span-5">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                  Acquisition Lot
+                  Collection / Acquisition Lot
                 </span>
                 {activeLotId ? (
                   <span
@@ -566,14 +749,16 @@ export function TriageWorkspace({
                     htmlFor="lot-name-input"
                     className="block text-[11px] text-slate-400"
                   >
-                    Lot Name / Buyout Source
+                    Collection / Friend / Buyout Name
                   </label>
                   <input
+                    ref={lotNameInputRef}
                     id="lot-name-input"
                     type="text"
+                    placeholder="e.g. Jon's Modern Binders / Mike's Commander Lot"
                     value={lotName}
                     onChange={(e) => setLotName(e.target.value)}
-                    className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm font-medium text-slate-100 focus:border-emerald-500 focus:outline-none"
+                    className="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm font-medium text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
                   />
                 </div>
 
@@ -770,6 +955,7 @@ export function TriageWorkspace({
         onClose={() => setSavedLotsDrawerOpen(false)}
         lots={savedLots}
         activeLotId={activeLotId}
+        onStartNewLot={handleStartNewCollectionLot}
         onLoadLot={handleLoadSavedLot}
         onUpdateSettlement={handleUpdateLotSettlement}
         onDeleteLot={handleDeleteLot}
