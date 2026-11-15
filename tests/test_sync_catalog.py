@@ -110,6 +110,8 @@ def test_parse_usd_cents_and_ck_credit_use_exact_decimal_math() -> None:
     assert sync_catalog.parse_usd(Decimal("0.355")) == Decimal("0.36")
     assert sync_catalog.parse_usd(11.5) == Decimal("11.50")
     assert sync_catalog.parse_usd(0) == Decimal("0.00")
+    assert sync_catalog.parse_usd("99999999.99") == Decimal("99999999.99")
+    assert sync_catalog.parse_usd("100000000.00") is None
     assert sync_catalog.parse_usd(None) is None
     assert sync_catalog.parse_usd("") is None
     assert sync_catalog.parse_usd("-1.00") is None
@@ -118,12 +120,15 @@ def test_parse_usd_cents_and_ck_credit_use_exact_decimal_math() -> None:
     assert sync_catalog.parse_cents_to_usd(307) == Decimal("3.07")
     assert sync_catalog.parse_cents_to_usd(0) == Decimal("0.00")
     assert sync_catalog.parse_cents_to_usd("1664") == Decimal("16.64")
+    assert sync_catalog.parse_cents_to_usd(9_999_999_999) == Decimal("99999999.99")
+    assert sync_catalog.parse_cents_to_usd(10_000_000_000) is None
     assert sync_catalog.parse_cents_to_usd(-5) is None
     assert sync_catalog.parse_cents_to_usd(None) is None
 
-    # Card Kingdom store credit is Cash * 1.30 quantized HALF_UP
+    # Card Kingdom store credit is Cash * 1.30 quantized HALF_UP and guarded for NUMERIC(10, 2)
     assert sync_catalog.compute_ck_credit(Decimal("11.50")) == Decimal("14.95")
     assert sync_catalog.compute_ck_credit(Decimal("0.35")) == Decimal("0.46")
+    assert sync_catalog.compute_ck_credit(Decimal("80000000.00")) is None
     assert sync_catalog.compute_ck_credit(
         Decimal("10.00"), explicit_credit=Decimal("13.25")
     ) == Decimal("13.25")
@@ -284,12 +289,17 @@ def test_end_to_end_bz2_etched_prices_manapool_supplement_and_prune(
 
     assert stats.scryfall_upserted == 2
     assert stats.identifiers_mapped == 2
+    assert stats.daily_prices_reset == 3
     assert stats.prices_updated == 1
     assert stats.manapool_supplemented == 1
     assert stats.sku_cache_pruned == 3
 
-    price_sql, price_rows = conn.executed[2]
-    assert "WHERE mtgjson_uuid = %(mtgjson_uuid)s" in price_sql
+    reset_sql, _ = conn.executed[2]
+    assert "SET\n    tcg_low_nm = NULL" in reset_sql
+
+    price_sql, price_rows = conn.executed[3]
+    assert "WHERE mtgjson_uuid = %(mtgjson_uuid)s::uuid" in price_sql
+    assert "ck_buylist_cash_nm = %(ck_buylist_cash_nm)s::numeric(10, 2)" in price_sql
     bolt_price = price_rows[0]
     assert bolt_price["tcg_market_nm"] == Decimal("2.55")
     assert bolt_price["tcg_market_etched"] == Decimal("6.40")
@@ -299,18 +309,40 @@ def test_end_to_end_bz2_etched_prices_manapool_supplement_and_prune(
     assert bolt_price["ck_buylist_cash_etched"] == Decimal("3.50")
     assert bolt_price["ck_buylist_credit_etched"] == Decimal("4.55")
 
-    mp_sql, mp_rows = conn.executed[3]
-    assert "COALESCE(card_catalog.manapool_low_nm, %(manapool_low_nm)s)" in mp_sql
+    mp_sql, mp_rows = conn.executed[4]
+    assert (
+        "COALESCE(card_catalog.manapool_low_nm, %(manapool_low_nm)s::numeric(10, 2))"
+        in mp_sql
+    )
+    assert (
+        "(card_catalog.manapool_low_etched IS NULL AND %(manapool_low_etched)s::numeric(10, 2) IS NOT NULL)"
+        in mp_sql
+    )
     assert mp_rows[0] == {
         "scryfall_id": "f6555d1f-d4cf-41f7-99d3-88fd53e75457",
         "tcgplayer_id": 56001,
         "manapool_low_nm": Decimal("0.85"),
-        "manapool_low_foil": Decimal("13.50"),
+        "manapool_low_foil": None,  # Unconstrained non-NM `price_cents_foil` (1350) is never substituted for NM
         "manapool_low_etched": Decimal("19.95"),
     }
 
-    prune_sql, _ = conn.executed[4]
+    prune_sql, _ = conn.executed[5]
     assert "DELETE FROM sku_price_cache" in prune_sql
+
+    # Standalone `--skip-prices` Stage 4 uses REFRESH_MANAPOOL_BY_SCRYFALL_SQL (`overwrite=True`)
+    standalone_conn = FakeConnection()
+    standalone_sink = sync_catalog.PostgresCatalogSink(standalone_conn)
+    sync_catalog.run_sync_pipeline(
+        standalone_sink,
+        manapool_source=manapool_gz,
+        skip_scryfall=True,
+        skip_identifiers=True,
+        skip_prices=True,
+        skip_prune_sku_cache=True,
+    )
+    standalone_sql, _ = standalone_conn.executed[0]
+    assert "manapool_low_nm = %(manapool_low_nm)s::numeric(10, 2)" in standalone_sql
+    assert "IS DISTINCT FROM" in standalone_sql
 
 
 def test_http_streaming_and_graceful_manapool_fallback() -> None:
@@ -391,3 +423,31 @@ def test_cli_dry_run_and_missing_database_url_guard(tmp_path: Path) -> None:
         ]
     )
     assert rc_no_db == 2
+
+
+def test_database_prepare_env_and_flag_configure_psycopg_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert sync_catalog.should_prepare_statements(env_value="") is True
+    assert sync_catalog.should_prepare_statements(env_value="true") is True
+    assert sync_catalog.should_prepare_statements(env_value="false") is False
+    assert sync_catalog.should_prepare_statements(env_value="0") is False
+    assert sync_catalog.should_prepare_statements(env_value="true", disable_flag=True) is False
+
+    import psycopg
+
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_connect(dsn: str, **kwargs: Any) -> str:
+        captured_calls.append((dsn, kwargs))
+        return "fake-conn"
+
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+
+    sync_catalog.connect_postgres("postgresql://localhost/test", prepare_statements=True)
+    sync_catalog.connect_postgres("postgresql://localhost/test", prepare_statements=False)
+
+    assert captured_calls == [
+        ("postgresql://localhost/test", {}),
+        ("postgresql://localhost/test", {"prepare_threshold": None}),
+    ]

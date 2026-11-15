@@ -5,10 +5,10 @@ alwaysApply: false
 
 # Nightly Scryfall, MTGJSON & Mana Pool Ingestion Pipeline
 
-- Never load the entire 450MB Scryfall JSON/JSONL or `AllPricesToday.json` into memory at once; use streaming JSON parsers (`ijson` in Python) or chunked processing, and quantize all USD amounts with `decimal.Decimal` (`0.01`, `ROUND_HALF_UP`).
+- Never load the entire 450MB Scryfall JSON/JSONL or `AllPricesToday.json` into memory at once; use streaming JSON parsers (`ijson` in Python) or chunked processing, quantize all USD amounts with `decimal.Decimal` (`0.01`, `ROUND_HALF_UP`), cap outlier values above `NUMERIC(10, 2)` (`99999999.99`), and disable server-side prepared statements (`prepare_threshold=None`) when `DATABASE_PREPARE=false`.
 - Sync order at 04:00 UTC:
   1. Download Scryfall `default_cards` bulk URI -> upsert identity (`scryfall_id`, `tcgplayer_id`, `tcgplayer_etched_id`, set/collector metadata) and baseline prices (`usd`, `usd_foil`, `usd_etched`).
   2. Map `scryfall_id` to `mtgjson_uuid` (primary face `side in (None, 'a')`) via `AllIdentifiers.json.bz2`.
-  3. Stream `AllPricesToday.json.bz2` -> extract `tcgplayer.retail`, `cardkingdom.buylist` (+ `1.30x` credit fallback), and `manapool.retail` across `normal`, `foil`, and `etched`.
-  4. Supplement any missing Mana Pool `normal`/`foil`/`etched` prices from Mana Pool's public singles JSON stream (`https://manapool.com/api/v1/prices/singles`, with optional `--skip-manapool` flag and graceful non-fatal fallback if unreachable).
+  3. Reset prior daily vendor-quote columns (`tcg_low_*`, `manapool_low_*`, `ck_buylist_*`) and stream `AllPricesToday.json.bz2` -> extract `tcgplayer.retail` (`tcg_market_*`), `cardkingdom.buylist` (+ `1.30x` credit fallback; dropped offers clear to `NULL`), and `manapool.retail` across `normal`, `foil`, and `etched`.
+  4. Supplement any missing Near Mint Mana Pool `normal`/`foil`/`etched` prices (`price_cents_nm*` only, never non-NM floor `price_cents*`) from Mana Pool's public singles JSON stream (`https://manapool.com/api/v1/prices/singles`, with optional `--skip-manapool` flag and graceful non-fatal fallback if unreachable).
   5. Bulk upsert/update PostgreSQL `card_catalog` in batches of 5,000 rows (`ON CONFLICT (scryfall_id) DO UPDATE`) and prune expired rows from `sku_price_cache` (`expires_at <= NOW()`).

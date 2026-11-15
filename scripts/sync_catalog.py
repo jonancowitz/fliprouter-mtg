@@ -52,6 +52,7 @@ DEFAULT_USER_AGENT = "FlipRouterMTG/0.1 (+https://github.com/jonancowitz/fliprou
 CENTS_QUANT = Decimal("0.01")
 CENTS_DIVISOR = Decimal("100")
 CK_CREDIT_MULTIPLIER = Decimal("1.30")
+MAX_NUMERIC_10_2_USD = Decimal("99999999.99")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -153,6 +154,7 @@ class SyncStats:
     identifiers_seen: int = 0
     identifiers_mapped: int = 0
     identifiers_batches: int = 0
+    daily_prices_reset: int = 0
     prices_seen: int = 0
     prices_updated: int = 0
     prices_batches: int = 0
@@ -183,22 +185,22 @@ INSERT INTO card_catalog (
     tcg_market_etched,
     updated_at
 ) VALUES (
-    %(scryfall_id)s,
-    %(oracle_id)s,
-    %(tcgplayer_id)s,
-    %(tcgplayer_etched_id)s,
-    %(cardkingdom_id)s,
-    %(cardkingdom_foil_id)s,
-    %(name)s,
-    %(set_code)s,
-    %(set_name)s,
-    %(collector_number)s,
-    %(rarity)s,
-    %(finishes)s,
-    %(image_uri)s,
-    %(tcg_market_nm)s,
-    %(tcg_market_foil)s,
-    %(tcg_market_etched)s,
+    %(scryfall_id)s::uuid,
+    %(oracle_id)s::uuid,
+    %(tcgplayer_id)s::integer,
+    %(tcgplayer_etched_id)s::integer,
+    %(cardkingdom_id)s::integer,
+    %(cardkingdom_foil_id)s::integer,
+    %(name)s::text,
+    %(set_code)s::varchar(16),
+    %(set_name)s::text,
+    %(collector_number)s::varchar(32),
+    %(rarity)s::varchar(16),
+    %(finishes)s::text[],
+    %(image_uri)s::text,
+    %(tcg_market_nm)s::numeric(10, 2),
+    %(tcg_market_foil)s::numeric(10, 2),
+    %(tcg_market_etched)s::numeric(10, 2),
     NOW()
 )
 ON CONFLICT (scryfall_id) DO UPDATE SET
@@ -227,55 +229,102 @@ SET
         WHEN EXISTS (
             SELECT 1
             FROM card_catalog existing
-            WHERE existing.mtgjson_uuid = %(mtgjson_uuid)s
-              AND existing.scryfall_id <> %(scryfall_id)s
+            WHERE existing.mtgjson_uuid = %(mtgjson_uuid)s::uuid
+              AND existing.scryfall_id <> %(scryfall_id)s::uuid
         ) THEN card_catalog.mtgjson_uuid
-        ELSE %(mtgjson_uuid)s
+        ELSE %(mtgjson_uuid)s::uuid
     END,
-    tcgplayer_id = COALESCE(%(tcgplayer_id)s, tcgplayer_id),
-    tcgplayer_etched_id = COALESCE(%(tcgplayer_etched_id)s, tcgplayer_etched_id),
-    cardkingdom_id = COALESCE(%(cardkingdom_id)s, cardkingdom_id),
-    cardkingdom_foil_id = COALESCE(%(cardkingdom_foil_id)s, cardkingdom_foil_id),
+    tcgplayer_id = COALESCE(%(tcgplayer_id)s::integer, tcgplayer_id),
+    tcgplayer_etched_id = COALESCE(%(tcgplayer_etched_id)s::integer, tcgplayer_etched_id),
+    cardkingdom_id = COALESCE(%(cardkingdom_id)s::integer, cardkingdom_id),
+    cardkingdom_foil_id = COALESCE(%(cardkingdom_foil_id)s::integer, cardkingdom_foil_id),
     updated_at = NOW()
-WHERE scryfall_id = %(scryfall_id)s;
+WHERE scryfall_id = %(scryfall_id)s::uuid;
+"""
+
+RESET_DAILY_VENDOR_PRICES_SQL = """
+UPDATE card_catalog
+SET
+    tcg_low_nm = NULL,
+    tcg_low_foil = NULL,
+    tcg_low_etched = NULL,
+    manapool_low_nm = NULL,
+    manapool_low_foil = NULL,
+    manapool_low_etched = NULL,
+    ck_buylist_cash_nm = NULL,
+    ck_buylist_credit_nm = NULL,
+    ck_buylist_cash_foil = NULL,
+    ck_buylist_credit_foil = NULL,
+    ck_buylist_cash_etched = NULL,
+    ck_buylist_credit_etched = NULL,
+    updated_at = NOW()
+WHERE tcg_low_nm IS NOT NULL
+   OR tcg_low_foil IS NOT NULL
+   OR tcg_low_etched IS NOT NULL
+   OR manapool_low_nm IS NOT NULL
+   OR manapool_low_foil IS NOT NULL
+   OR manapool_low_etched IS NOT NULL
+   OR ck_buylist_cash_nm IS NOT NULL
+   OR ck_buylist_credit_nm IS NOT NULL
+   OR ck_buylist_cash_foil IS NOT NULL
+   OR ck_buylist_credit_foil IS NOT NULL
+   OR ck_buylist_cash_etched IS NOT NULL
+   OR ck_buylist_credit_etched IS NOT NULL;
 """
 
 UPDATE_PRICES_BY_MTGJSON_SQL = """
 UPDATE card_catalog
 SET
-    tcg_market_nm = COALESCE(%(tcg_market_nm)s, tcg_market_nm),
-    tcg_low_nm = COALESCE(%(tcg_low_nm)s, tcg_low_nm),
-    tcg_market_foil = COALESCE(%(tcg_market_foil)s, tcg_market_foil),
-    tcg_low_foil = COALESCE(%(tcg_low_foil)s, tcg_low_foil),
-    tcg_market_etched = COALESCE(%(tcg_market_etched)s, tcg_market_etched),
-    tcg_low_etched = COALESCE(%(tcg_low_etched)s, tcg_low_etched),
-    manapool_low_nm = COALESCE(%(manapool_low_nm)s, manapool_low_nm),
-    manapool_low_foil = COALESCE(%(manapool_low_foil)s, manapool_low_foil),
-    manapool_low_etched = COALESCE(%(manapool_low_etched)s, manapool_low_etched),
-    ck_buylist_cash_nm = COALESCE(%(ck_buylist_cash_nm)s, ck_buylist_cash_nm),
-    ck_buylist_credit_nm = COALESCE(%(ck_buylist_credit_nm)s, ck_buylist_credit_nm),
-    ck_buylist_cash_foil = COALESCE(%(ck_buylist_cash_foil)s, ck_buylist_cash_foil),
-    ck_buylist_credit_foil = COALESCE(%(ck_buylist_credit_foil)s, ck_buylist_credit_foil),
-    ck_buylist_cash_etched = COALESCE(%(ck_buylist_cash_etched)s, ck_buylist_cash_etched),
-    ck_buylist_credit_etched = COALESCE(%(ck_buylist_credit_etched)s, ck_buylist_credit_etched),
+    tcg_market_nm = COALESCE(%(tcg_market_nm)s::numeric(10, 2), tcg_market_nm),
+    tcg_low_nm = %(tcg_low_nm)s::numeric(10, 2),
+    tcg_market_foil = COALESCE(%(tcg_market_foil)s::numeric(10, 2), tcg_market_foil),
+    tcg_low_foil = %(tcg_low_foil)s::numeric(10, 2),
+    tcg_market_etched = COALESCE(%(tcg_market_etched)s::numeric(10, 2), tcg_market_etched),
+    tcg_low_etched = %(tcg_low_etched)s::numeric(10, 2),
+    manapool_low_nm = %(manapool_low_nm)s::numeric(10, 2),
+    manapool_low_foil = %(manapool_low_foil)s::numeric(10, 2),
+    manapool_low_etched = %(manapool_low_etched)s::numeric(10, 2),
+    ck_buylist_cash_nm = %(ck_buylist_cash_nm)s::numeric(10, 2),
+    ck_buylist_credit_nm = %(ck_buylist_credit_nm)s::numeric(10, 2),
+    ck_buylist_cash_foil = %(ck_buylist_cash_foil)s::numeric(10, 2),
+    ck_buylist_credit_foil = %(ck_buylist_credit_foil)s::numeric(10, 2),
+    ck_buylist_cash_etched = %(ck_buylist_cash_etched)s::numeric(10, 2),
+    ck_buylist_credit_etched = %(ck_buylist_credit_etched)s::numeric(10, 2),
     updated_at = NOW()
-WHERE mtgjson_uuid = %(mtgjson_uuid)s;
+WHERE mtgjson_uuid = %(mtgjson_uuid)s::uuid;
 """
 
 SUPPLEMENT_MANAPOOL_BY_SCRYFALL_SQL = """
 UPDATE card_catalog
 SET
-    tcgplayer_id = COALESCE(card_catalog.tcgplayer_id, %(tcgplayer_id)s),
-    manapool_low_nm = COALESCE(card_catalog.manapool_low_nm, %(manapool_low_nm)s),
-    manapool_low_foil = COALESCE(card_catalog.manapool_low_foil, %(manapool_low_foil)s),
-    manapool_low_etched = COALESCE(card_catalog.manapool_low_etched, %(manapool_low_etched)s),
+    tcgplayer_id = COALESCE(card_catalog.tcgplayer_id, %(tcgplayer_id)s::integer),
+    manapool_low_nm = COALESCE(card_catalog.manapool_low_nm, %(manapool_low_nm)s::numeric(10, 2)),
+    manapool_low_foil = COALESCE(card_catalog.manapool_low_foil, %(manapool_low_foil)s::numeric(10, 2)),
+    manapool_low_etched = COALESCE(card_catalog.manapool_low_etched, %(manapool_low_etched)s::numeric(10, 2)),
     updated_at = NOW()
-WHERE scryfall_id = %(scryfall_id)s
+WHERE scryfall_id = %(scryfall_id)s::uuid
   AND (
-      card_catalog.manapool_low_nm IS NULL
-      OR card_catalog.manapool_low_foil IS NULL
-      OR card_catalog.manapool_low_etched IS NULL
-      OR card_catalog.tcgplayer_id IS NULL
+      (card_catalog.tcgplayer_id IS NULL AND %(tcgplayer_id)s::integer IS NOT NULL)
+      OR (card_catalog.manapool_low_nm IS NULL AND %(manapool_low_nm)s::numeric(10, 2) IS NOT NULL)
+      OR (card_catalog.manapool_low_foil IS NULL AND %(manapool_low_foil)s::numeric(10, 2) IS NOT NULL)
+      OR (card_catalog.manapool_low_etched IS NULL AND %(manapool_low_etched)s::numeric(10, 2) IS NOT NULL)
+  );
+"""
+
+REFRESH_MANAPOOL_BY_SCRYFALL_SQL = """
+UPDATE card_catalog
+SET
+    tcgplayer_id = COALESCE(card_catalog.tcgplayer_id, %(tcgplayer_id)s::integer),
+    manapool_low_nm = %(manapool_low_nm)s::numeric(10, 2),
+    manapool_low_foil = %(manapool_low_foil)s::numeric(10, 2),
+    manapool_low_etched = %(manapool_low_etched)s::numeric(10, 2),
+    updated_at = NOW()
+WHERE scryfall_id = %(scryfall_id)s::uuid
+  AND (
+      (card_catalog.tcgplayer_id IS NULL AND %(tcgplayer_id)s::integer IS NOT NULL)
+      OR card_catalog.manapool_low_nm IS DISTINCT FROM %(manapool_low_nm)s::numeric(10, 2)
+      OR card_catalog.manapool_low_foil IS DISTINCT FROM %(manapool_low_foil)s::numeric(10, 2)
+      OR card_catalog.manapool_low_etched IS DISTINCT FROM %(manapool_low_etched)s::numeric(10, 2)
   );
 """
 
@@ -290,9 +339,16 @@ class CatalogSink(Protocol):
 
     def update_identifier_batch(self, batch: list[IdentifierMappingRecord]) -> int: ...
 
+    def reset_daily_vendor_prices(self) -> int: ...
+
     def update_price_batch(self, batch: list[PriceUpdateRecord]) -> int: ...
 
-    def supplement_manapool_batch(self, batch: list[ManaPoolSingleRecord]) -> int: ...
+    def supplement_manapool_batch(
+        self,
+        batch: list[ManaPoolSingleRecord],
+        *,
+        overwrite: bool = False,
+    ) -> int: ...
 
     def prune_expired_sku_cache(self) -> int: ...
 
@@ -306,10 +362,19 @@ class DryRunCatalogSink:
     def update_identifier_batch(self, batch: list[IdentifierMappingRecord]) -> int:
         return len(batch)
 
+    def reset_daily_vendor_prices(self) -> int:
+        return 0
+
     def update_price_batch(self, batch: list[PriceUpdateRecord]) -> int:
         return len(batch)
 
-    def supplement_manapool_batch(self, batch: list[ManaPoolSingleRecord]) -> int:
+    def supplement_manapool_batch(
+        self,
+        batch: list[ManaPoolSingleRecord],
+        *,
+        overwrite: bool = False,
+    ) -> int:
+        _ = overwrite
         return len(batch)
 
     def prune_expired_sku_cache(self) -> int:
@@ -348,6 +413,13 @@ class PostgresCatalogSink:
                 cur.executemany(UPDATE_IDENTIFIERS_SQL, rows)
         return len(rows)
 
+    def reset_daily_vendor_prices(self) -> int:
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(RESET_DAILY_VENDOR_PRICES_SQL)
+                rowcount = getattr(cur, "rowcount", 0)
+                return int(rowcount) if isinstance(rowcount, int) and rowcount > 0 else 0
+
     def update_price_batch(self, batch: list[PriceUpdateRecord]) -> int:
         if not batch:
             return 0
@@ -358,14 +430,24 @@ class PostgresCatalogSink:
                 cur.executemany(UPDATE_PRICES_BY_MTGJSON_SQL, rows)
         return len(rows)
 
-    def supplement_manapool_batch(self, batch: list[ManaPoolSingleRecord]) -> int:
+    def supplement_manapool_batch(
+        self,
+        batch: list[ManaPoolSingleRecord],
+        *,
+        overwrite: bool = False,
+    ) -> int:
         if not batch:
             return 0
         deduped = {record.scryfall_id: dataclasses.asdict(record) for record in batch}
         rows = list(deduped.values())
+        sql = (
+            REFRESH_MANAPOOL_BY_SCRYFALL_SQL
+            if overwrite
+            else SUPPLEMENT_MANAPOOL_BY_SCRYFALL_SQL
+        )
         with self._conn.transaction():
             with self._conn.cursor() as cur:
-                cur.executemany(SUPPLEMENT_MANAPOOL_BY_SCRYFALL_SQL, rows)
+                cur.executemany(sql, rows)
         return len(rows)
 
     def prune_expired_sku_cache(self) -> int:
@@ -399,7 +481,10 @@ def parse_usd(raw: Any) -> Decimal | None:
 
     if not dec.is_finite() or dec < 0:
         return None
-    return dec.quantize(CENTS_QUANT, rounding=ROUND_HALF_UP)
+    quantized = dec.quantize(CENTS_QUANT, rounding=ROUND_HALF_UP)
+    if quantized > MAX_NUMERIC_10_2_USD:
+        return None
+    return quantized
 
 
 def parse_cents_to_usd(raw: Any) -> Decimal | None:
@@ -417,7 +502,10 @@ def parse_cents_to_usd(raw: Any) -> Decimal | None:
 
     if not cents.is_finite() or cents < 0:
         return None
-    return (cents / CENTS_DIVISOR).quantize(CENTS_QUANT, rounding=ROUND_HALF_UP)
+    quantized = (cents / CENTS_DIVISOR).quantize(CENTS_QUANT, rounding=ROUND_HALF_UP)
+    if quantized > MAX_NUMERIC_10_2_USD:
+        return None
+    return quantized
 
 
 def compute_ck_credit(
@@ -425,10 +513,13 @@ def compute_ck_credit(
     explicit_credit: Decimal | None = None,
 ) -> Decimal | None:
     if explicit_credit is not None:
-        return explicit_credit
+        return explicit_credit if explicit_credit <= MAX_NUMERIC_10_2_USD else None
     if cash is None:
         return None
-    return (cash * CK_CREDIT_MULTIPLIER).quantize(CENTS_QUANT, rounding=ROUND_HALF_UP)
+    credit = (cash * CK_CREDIT_MULTIPLIER).quantize(CENTS_QUANT, rounding=ROUND_HALF_UP)
+    if credit > MAX_NUMERIC_10_2_USD:
+        return None
+    return credit
 
 
 def normalize_uuid(raw: Any) -> str | None:
@@ -683,17 +774,12 @@ def extract_manapool_single(entry: dict[str, Any]) -> ManaPoolSingleRecord | Non
     if not scryfall_id:
         return None
 
+    # Restrict strictly to Near Mint Mana Pool quotes (`price_cents_nm*`); never fall back
+    # to unconstrained `price_cents*`, which includes HP/DMG listings and would cause
+    # double condition discounting when Step 3 applies non-NM multipliers.
     nm = parse_cents_to_usd(entry.get("price_cents_nm"))
-    if nm is None:
-        nm = parse_cents_to_usd(entry.get("price_cents"))
-
     foil = parse_cents_to_usd(entry.get("price_cents_nm_foil"))
-    if foil is None:
-        foil = parse_cents_to_usd(entry.get("price_cents_foil"))
-
     etched = parse_cents_to_usd(entry.get("price_cents_nm_etched"))
-    if etched is None:
-        etched = parse_cents_to_usd(entry.get("price_cents_etched"))
 
     record = ManaPoolSingleRecord(
         scryfall_id=scryfall_id,
@@ -886,6 +972,7 @@ def sync_manapool_singles_stage(
     stats: SyncStats,
     batch_size: int = DEFAULT_BATCH_SIZE,
     limit: int | None = None,
+    overwrite: bool = False,
 ) -> None:
     def single_records() -> Iterator[ManaPoolSingleRecord]:
         for entry in ijson.items(stream, "data.item"):
@@ -897,7 +984,10 @@ def sync_manapool_singles_stage(
                 break
 
     for batch in chunked(single_records(), batch_size):
-        stats.manapool_supplemented += sink.supplement_manapool_batch(batch)
+        stats.manapool_supplemented += sink.supplement_manapool_batch(
+            batch,
+            overwrite=overwrite,
+        )
         stats.manapool_batches += 1
 
 
@@ -966,6 +1056,8 @@ def run_sync_pipeline(
                 "Stage 3/4: Streaming MTGJSON AllPricesToday from %s", prices_source
             )
             with open_streaming_source(prices_source, client=client) as stream:
+                if limit is None and stream.peek(4):
+                    stats.daily_prices_reset = sink.reset_daily_vendor_prices()
                 sync_prices_stage(
                     stream,
                     sink,
@@ -974,7 +1066,8 @@ def run_sync_pipeline(
                     limit=limit,
                 )
             LOGGER.info(
-                "Stage 3 complete: seen=%d updated=%d batches=%d",
+                "Stage 3 complete: reset=%d seen=%d updated=%d batches=%d",
+                stats.daily_prices_reset,
                 stats.prices_seen,
                 stats.prices_updated,
                 stats.prices_batches,
@@ -993,6 +1086,7 @@ def run_sync_pipeline(
                         stats,
                         batch_size=batch_size,
                         limit=limit,
+                        overwrite=skip_prices,
                     )
                 LOGGER.info(
                     "Stage 4 complete: seen=%d supplemented=%d batches=%d",
@@ -1092,12 +1186,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Stream and parse upstream payloads without writing to PostgreSQL.",
     )
     parser.add_argument(
+        "--no-prepare",
+        action="store_true",
+        help="Disable psycopg server-side prepared statements (also enabled when DATABASE_PREPARE=false).",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging verbosity.",
     )
     return parser
+
+
+def should_prepare_statements(
+    env_value: str | None = None,
+    *,
+    disable_flag: bool = False,
+) -> bool:
+    if disable_flag:
+        return False
+    raw = env_value if env_value is not None else os.environ.get("DATABASE_PREPARE", "")
+    return raw.strip().lower() not in {"false", "0", "no", "off"}
+
+
+def connect_postgres(
+    database_url: str,
+    *,
+    prepare_statements: bool = True,
+) -> Any:
+    import psycopg
+
+    connect_kwargs: dict[str, Any] = {}
+    if not prepare_statements:
+        connect_kwargs["prepare_threshold"] = None
+    return psycopg.connect(database_url, **connect_kwargs)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1133,9 +1256,11 @@ def main(argv: list[str] | None = None) -> int:
         LOGGER.error("DATABASE_URL or --database-url is required unless --dry-run is set.")
         return 2
 
-    import psycopg
-
-    with psycopg.connect(args.database_url) as conn:
+    prepare_statements = should_prepare_statements(disable_flag=args.no_prepare)
+    with connect_postgres(
+        args.database_url,
+        prepare_statements=prepare_statements,
+    ) as conn:
         pg_sink = PostgresCatalogSink(conn)
         stats = run_sync_pipeline(
             pg_sink,

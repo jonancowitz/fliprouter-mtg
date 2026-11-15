@@ -16,6 +16,24 @@ import {
 export const CARD_FINISHES = ["normal", "foil", "etched"] as const;
 export type CardFinish = (typeof CARD_FINISHES)[number];
 
+export const CATALOG_FINISHES = ["nonfoil", "foil", "etched"] as const;
+export type CatalogFinish = (typeof CATALOG_FINISHES)[number];
+
+export function toCatalogFinish(finish: CardFinish): CatalogFinish {
+  return finish === "normal" ? "nonfoil" : finish;
+}
+
+export function fromCatalogFinish(rawFinish: string): CardFinish {
+  const normalized = rawFinish.trim().toLowerCase();
+  if (normalized === "etched" || normalized === "foil etched") {
+    return "etched";
+  }
+  if (normalized === "foil") {
+    return "foil";
+  }
+  return "normal";
+}
+
 export const CARD_CONDITIONS = ["NM", "LP", "MP", "HP", "DMG"] as const;
 export type CardCondition = (typeof CARD_CONDITIONS)[number];
 
@@ -26,6 +44,22 @@ export const ASSIGNED_BUCKETS = [
   "PILE_4_BULK",
 ] as const;
 export type AssignedBucket = (typeof ASSIGNED_BUCKETS)[number];
+
+export const RECOMMENDED_CHANNELS = [
+  "tcgplayer_single",
+  "manapool_single",
+  "p2p_85_pct",
+  "ck_cash",
+  "ck_credit",
+  "conduit_sorted",
+  "conduit_curated",
+  "conduit_standard",
+  "binder_local",
+  "bulk_wholesale",
+] as const;
+export type RecommendedChannel =
+  | (typeof RECOMMENDED_CHANNELS)[number]
+  | (string & {});
 
 export const CONDUIT_TIERS = ["sorted", "curated", "standard"] as const;
 export type ConduitTierPreference = (typeof CONDUIT_TIERS)[number];
@@ -247,7 +281,9 @@ export const lotItems = pgTable(
       .notNull(),
     recommendedChannel: varchar("recommended_channel", {
       length: 32,
-    }).notNull(),
+    })
+      .$type<RecommendedChannel>()
+      .notNull(),
     optimalUnitNetUsd: usdNumeric("optimal_unit_net_usd").notNull(),
   },
   (table) => [
