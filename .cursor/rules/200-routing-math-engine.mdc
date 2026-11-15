@@ -1,26 +1,36 @@
 ---
-description: Deterministic fee formulas, condition multipliers, and 4-bucket routing tree
+description: Deterministic fee formulas, condition multipliers, quarantine rules, and 4-bucket routing tree
 globs: ["**/routing/**/*.ts", "**/pricing/**/*.ts", "**/engine/**/*.py"]
 alwaysApply: false
 ---
 
 # Liquidation Math & 4-Bucket Decision Tree
 
-## 1. Condition Multipliers (Fallback when using NM Cache)
+## 1. Condition Multipliers & Buylist Quarantine
 - **Retail:** `NM = 1.00`, `LP = 0.88`, `MP = 0.72`, `HP = 0.52`, `DMG = 0.35`
-- **Buylist:** `NM = 1.00`, `LP = 0.80`, `MP = 0.65`, `HP = 0.50` (Apply an extra `0.90` multiplier to non-NM foils).
+- **Buylist:** `NM = 1.00`, `LP = 0.80`, `MP = 0.65`, `HP = 0.50`, `DMG = 0.00` (Apply an extra `0.90` multiplier to non-NM `foil` and `etched` cards).
+- **Auto-Quarantine from Buylists:** Items with `condition == 'DMG'`, `LOWER(language) != 'en'`, `is_altered == true`, or `is_misprint == true` are ineligible for `PILE_1_BUYLIST` and `PILE_3_CREDIT_ARB` (`P_buy = 0.00`).
 
-## 2. Net Payout Formulas (Per Card)
+## 2. Channel Price Hierarchy & Net Payout Formulas (Per Card)
+- **Channel Baselines (`normal` / `foil` / `etched`, unless overridden per non-null column by fresh `sku_price_cache`; fall back per-channel to condition-adjusted `card_catalog` when an individual cached column such as `buylist_cash_usd` is `NULL`):**
+  - `P_retail_TCG`: `COALESCE(tcg_market_*, tcg_low_*)` (`etched` falls back to `tcg_market_foil`).
+  - `P_retail_MP`: `COALESCE(manapool_low_*, tcg_low_*, tcg_market_*)` (`etched` falls back to `tcg_low_foil, tcg_market_foil`).
+  - `P_retail_P2P`: `COALESCE(tcg_low_*, tcg_market_*)` (`etched` falls back to `tcg_low_foil, tcg_market_foil`; note Scryfall + MTGJSON v5 populate `tcg_market_*` locally when `tcg_low_*` is `NULL`).
+  - `P_buy_CK`: `COALESCE(ck_buylist_cash_*, 0.00)` (never assume foil buylist for `etched` when `ck_buylist_cash_etched` is null).
 - `C_labor = (seconds_per_single_order / 3600) * hourly_labor_rate_usd`
-- `C_ship = (P_retail < tracked_threshold_usd) ? pwe_shipping_cost_usd : tracked_shipping_cost_usd`
-- **TCGplayer Single:** `Net_TCG = (P_retail * 0.8675) - 0.30 - C_ship - C_labor` (Capping the 10.75% commission portion at $75.00).
-- **Mana Pool Single:** `Net_MP = (P_retail * 0.921) - 0.30 - C_ship - C_labor`
-- **P2P 85% Claim Sale:** `Net_P2P = ((P_retail * 0.85) * 0.965) - C_ship - (0.5 * C_labor)`
-- **Buylist Net:** `Net_CK_Cash = P_buy_CK`; `Net_Conduit_Sorted = P_buy * 0.98`; `Net_Conduit_Curated = P_buy * 0.95`.
-- **Store Credit Arbitrage:** `Net_Credit_Arb = (P_buy_CK * 1.30) * 0.82`
+- `C_ship(P_sale) = (P_sale < tracked_threshold_usd) ? pwe_shipping_cost_usd : tracked_shipping_cost_usd`
+- **TCGplayer Single ($75 Commission Cap):** `Net_TCG = P_retail_TCG - min(P_retail_TCG * 0.1075, 75.00) - (P_retail_TCG * 0.025) - 0.30 - C_ship(P_retail_TCG) - C_labor`
+- **Mana Pool Single:** `Net_MP = (P_retail_MP * 0.921) - 0.30 - C_ship(P_retail_MP) - C_labor`
+- **P2P 85% Claim Sale:** `Net_P2P = ((P_retail_P2P * 0.85) * 0.965) - C_ship(P_retail_P2P * 0.85) - (0.5 * C_labor)`
+- **Buylist Cash Net:** `Net_CK_Cash = P_buy_CK`; `Net_Conduit_Sorted = P_buy * 0.98`; `Net_Conduit_Curated = P_buy * 0.95`; `Net_Conduit_Standard = max(0.00, P_buy * 0.90 - 0.03)`; `Net_Buylist_Cash = max(Net_CK_Cash, Net_Conduit_Tier)`.
+- **Store Credit Arbitrage:** `Net_Credit_Arb = Credit_CK * 0.82` (typically `(P_buy_CK * 1.30) * 0.82`).
 
-## 3. Strict Evaluation Order
-1. `PILE_4_BULK`: `P_buy < 0.50` AND `max(Net_TCG, Net_MP) < 0.75`.
-2. `PILE_1_BUYLIST`: `P_buy >= 0.50` AND `(max(Net_TCG, Net_MP, Net_P2P) - Net_Buylist) < min_single_net_gain_over_buylist_usd`.
-3. `PILE_3_CREDIT_ARB`: `enable_credit_arbitrage == true` AND `Net_Credit_Arb > max(Net_TCG, Net_MP)`.
-4. `PILE_2_SINGLES`: All remaining high-spread cards.
+## 3. Strict Evaluation Order (`Net_BestSingle = max(Net_TCG, Net_MP, Net_P2P)`)
+1. `PILE_4_BULK`: `P_buy < 0.50` AND `Net_BestSingle < 0.75`.
+2. `PILE_3_CREDIT_ARB`: Buylist-eligible (`P_buy_CK >= 0.50`), `enable_credit_arbitrage == true`, `Net_Credit_Arb > Net_Buylist_Cash`, AND `(Net_BestSingle - Net_Credit_Arb) < min_single_net_gain_over_buylist_usd`.
+3. `PILE_1_BUYLIST`: Buylist-eligible (`P_buy >= 0.50`) AND `(Net_BestSingle - Net_Buylist_Cash) < min_single_net_gain_over_buylist_usd`.
+4. `PILE_2_SINGLES`: All remaining cards.
+
+## 4. Lot-Level Box Postage & Schedule C Basis
+- Deduct `outbound_buylist_box_shipping_usd` (default `12.00`) once per distinct outbound vendor buylist shipment (one combined `$12.00` box when `PILE_1_BUYLIST` (`ck_cash`) and `PILE_3_CREDIT_ARB` (`ck_credit`) both ship to Card Kingdom; separate `$12.00` boxes per vendor if shipping to both Card Conduit and Card Kingdom); demote tiny buylist shipments when box postage exceeds margin over singles (`Net_BestSingle >= 0.75`) / bulk fallbacks.
+- Allocate `purchase_cost_usd` proportionally to initial condition-adjusted FMV across `lot_items.allocated_cost_basis_usd`.

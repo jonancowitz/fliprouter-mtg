@@ -20,6 +20,7 @@ import sync_catalog  # noqa: E402
 class FakeCursor:
     def __init__(self, executed: list[tuple[str, list[dict[str, Any]]]]) -> None:
         self._executed = executed
+        self.rowcount = 3
 
     def __enter__(self) -> FakeCursor:
         return self
@@ -29,6 +30,9 @@ class FakeCursor:
 
     def executemany(self, sql: str, params_seq: list[dict[str, Any]]) -> None:
         self._executed.append((sql, list(params_seq)))
+
+    def execute(self, sql: str) -> None:
+        self._executed.append((sql, []))
 
 
 class FakeConnection:
@@ -101,19 +105,30 @@ def _sample_scryfall_cards() -> list[dict[str, Any]]:
     ]
 
 
-def test_parse_usd_and_ck_credit_use_exact_decimal_math() -> None:
+def test_parse_usd_cents_and_ck_credit_use_exact_decimal_math() -> None:
     assert sync_catalog.parse_usd("18.54") == Decimal("18.54")
     assert sync_catalog.parse_usd(Decimal("0.355")) == Decimal("0.36")
     assert sync_catalog.parse_usd(11.5) == Decimal("11.50")
     assert sync_catalog.parse_usd(0) == Decimal("0.00")
+    assert sync_catalog.parse_usd("99999999.99") == Decimal("99999999.99")
+    assert sync_catalog.parse_usd("100000000.00") is None
     assert sync_catalog.parse_usd(None) is None
     assert sync_catalog.parse_usd("") is None
     assert sync_catalog.parse_usd("-1.00") is None
     assert sync_catalog.parse_usd(True) is None
 
-    # Card Kingdom store credit is Cash * 1.30 quantized HALF_UP
+    assert sync_catalog.parse_cents_to_usd(307) == Decimal("3.07")
+    assert sync_catalog.parse_cents_to_usd(0) == Decimal("0.00")
+    assert sync_catalog.parse_cents_to_usd("1664") == Decimal("16.64")
+    assert sync_catalog.parse_cents_to_usd(9_999_999_999) == Decimal("99999999.99")
+    assert sync_catalog.parse_cents_to_usd(10_000_000_000) is None
+    assert sync_catalog.parse_cents_to_usd(-5) is None
+    assert sync_catalog.parse_cents_to_usd(None) is None
+
+    # Card Kingdom store credit is Cash * 1.30 quantized HALF_UP and guarded for NUMERIC(10, 2)
     assert sync_catalog.compute_ck_credit(Decimal("11.50")) == Decimal("14.95")
     assert sync_catalog.compute_ck_credit(Decimal("0.35")) == Decimal("0.46")
+    assert sync_catalog.compute_ck_credit(Decimal("80000000.00")) is None
     assert sync_catalog.compute_ck_credit(
         Decimal("10.00"), explicit_credit=Decimal("13.25")
     ) == Decimal("13.25")
@@ -160,7 +175,9 @@ def test_streaming_json_array_and_gzipped_jsonl_formats(tmp_path: Path) -> None:
         )
 
 
-def test_end_to_end_bz2_identifiers_and_prices_pipeline(tmp_path: Path) -> None:
+def test_end_to_end_bz2_etched_prices_manapool_supplement_and_prune(
+    tmp_path: Path,
+) -> None:
     scryfall_path = tmp_path / "scryfall.jsonl.gz"
     with gzip.open(scryfall_path, "wt", encoding="utf-8") as gz:
         for card in _sample_scryfall_cards():
@@ -169,7 +186,6 @@ def test_end_to_end_bz2_identifiers_and_prices_pipeline(tmp_path: Path) -> None:
     identifiers_payload = {
         "meta": {"date": "2026-11-14", "version": "5.3.0"},
         "data": {
-            # Primary face 'a' should bind mtgjson_uuid
             "00010d56-fe38-5e35-8aed-518019aa36a5": {
                 "side": "a",
                 "availability": ["paper"],
@@ -180,7 +196,6 @@ def test_end_to_end_bz2_identifiers_and_prices_pipeline(tmp_path: Path) -> None:
                     "tcgplayerProductId": "56001",
                 },
             },
-            # Secondary face 'b' sharing Scryfall ID must be ignored
             "99990d56-fe38-5e35-8aed-518019aa36a5": {
                 "side": "b",
                 "availability": ["paper"],
@@ -212,23 +227,27 @@ def test_end_to_end_bz2_identifiers_and_prices_pipeline(tmp_path: Path) -> None:
                             "normal": {"2026-11-13": 2.30, "2026-11-14": 2.55},
                             "foil": {"2026-11-14": 5.10},
                             "etched": {"2026-11-14": 6.40},
-                        }
+                        },
+                        "retail_low": {
+                            "etched": {"2026-11-14": 5.95},
+                        },
                     },
                     "manapool": {
                         "retail": {
                             "normal": {"2026-11-14": 2.15},
                             "foil": {"2026-11-14": 4.65},
+                            "etched": {"2026-11-14": 5.85},
                         }
                     },
                     "cardkingdom": {
                         "buylist": {
                             "normal": {"2026-11-14": 1.40},
                             "foil": {"2026-11-14": 2.80},
+                            "etched": {"2026-11-14": 3.50},
                         }
                     },
                 }
             },
-            # MTGO-only entry without paper prices should be skipped
             "deadbeef-dead-beef-dead-beefdeadbeef": {
                 "mtgo": {"cardhoarder": {"retail": {"normal": {"2026-11-14": 0.05}}}}
             },
@@ -238,6 +257,25 @@ def test_end_to_end_bz2_identifiers_and_prices_pipeline(tmp_path: Path) -> None:
     with bz2.open(prices_bz2, "wt", encoding="utf-8") as bz:
         json.dump(prices_payload, bz)
 
+    manapool_singles_payload = {
+        "meta": {"as_of": "2026-11-15T02:21:26.180Z"},
+        "data": [
+            {
+                "scryfall_id": "f6555d1f-d4cf-41f7-99d3-88fd53e75457",
+                "tcgplayer_product_id": 56001,
+                "price_cents": 75,
+                "price_cents_nm": 85,
+                "price_cents_foil": 1350,
+                "price_cents_nm_foil": None,
+                "price_cents_etched": None,
+                "price_cents_nm_etched": 1995,
+            }
+        ],
+    }
+    manapool_gz = tmp_path / "singles.json.gz"
+    with gzip.open(manapool_gz, "wt", encoding="utf-8") as gz:
+        json.dump(manapool_singles_payload, gz)
+
     conn = FakeConnection()
     sink = sync_catalog.PostgresCatalogSink(conn)
     stats = sync_catalog.run_sync_pipeline(
@@ -245,39 +283,69 @@ def test_end_to_end_bz2_identifiers_and_prices_pipeline(tmp_path: Path) -> None:
         scryfall_source=scryfall_path,
         identifiers_source=identifiers_bz2,
         prices_source=prices_bz2,
+        manapool_source=manapool_gz,
         batch_size=5000,
     )
 
     assert stats.scryfall_upserted == 2
     assert stats.identifiers_mapped == 2
+    assert stats.daily_prices_reset == 3
     assert stats.prices_updated == 1
+    assert stats.manapool_supplemented == 1
+    assert stats.sku_cache_pruned == 3
 
-    id_sql, id_rows = conn.executed[1]
-    assert "UPDATE card_catalog" in id_sql
-    by_scryfall = {r["scryfall_id"]: r for r in id_rows}
-    assert (
-        by_scryfall["f6555d1f-d4cf-41f7-99d3-88fd53e75457"]["mtgjson_uuid"]
-        == "00010d56-fe38-5e35-8aed-518019aa36a5"
-    )
-    assert (
-        by_scryfall["f6555d1f-d4cf-41f7-99d3-88fd53e75457"]["cardkingdom_id"] == 185001
-    )
+    reset_sql, _ = conn.executed[2]
+    assert "SET\n    tcg_low_nm = NULL" in reset_sql
 
-    price_sql, price_rows = conn.executed[2]
-    assert "WHERE mtgjson_uuid = %(mtgjson_uuid)s" in price_sql
+    price_sql, price_rows = conn.executed[3]
+    assert "WHERE mtgjson_uuid = %(mtgjson_uuid)s::uuid" in price_sql
+    assert "ck_buylist_cash_nm = %(ck_buylist_cash_nm)s::numeric(10, 2)" in price_sql
     bolt_price = price_rows[0]
     assert bolt_price["tcg_market_nm"] == Decimal("2.55")
-    assert bolt_price["tcg_market_foil"] == Decimal("5.10")
     assert bolt_price["tcg_market_etched"] == Decimal("6.40")
+    assert bolt_price["tcg_low_etched"] == Decimal("5.95")
     assert bolt_price["manapool_low_nm"] == Decimal("2.15")
-    assert bolt_price["manapool_low_foil"] == Decimal("4.65")
-    assert bolt_price["ck_buylist_cash_nm"] == Decimal("1.40")
-    assert bolt_price["ck_buylist_credit_nm"] == Decimal("1.82")
-    assert bolt_price["ck_buylist_cash_foil"] == Decimal("2.80")
-    assert bolt_price["ck_buylist_credit_foil"] == Decimal("3.64")
+    assert bolt_price["manapool_low_etched"] == Decimal("5.85")
+    assert bolt_price["ck_buylist_cash_etched"] == Decimal("3.50")
+    assert bolt_price["ck_buylist_credit_etched"] == Decimal("4.55")
+
+    mp_sql, mp_rows = conn.executed[4]
+    assert (
+        "COALESCE(card_catalog.manapool_low_nm, %(manapool_low_nm)s::numeric(10, 2))"
+        in mp_sql
+    )
+    assert (
+        "(card_catalog.manapool_low_etched IS NULL AND %(manapool_low_etched)s::numeric(10, 2) IS NOT NULL)"
+        in mp_sql
+    )
+    assert mp_rows[0] == {
+        "scryfall_id": "f6555d1f-d4cf-41f7-99d3-88fd53e75457",
+        "tcgplayer_id": 56001,
+        "manapool_low_nm": Decimal("0.85"),
+        "manapool_low_foil": None,  # Unconstrained non-NM `price_cents_foil` (1350) is never substituted for NM
+        "manapool_low_etched": Decimal("19.95"),
+    }
+
+    prune_sql, _ = conn.executed[5]
+    assert "DELETE FROM sku_price_cache" in prune_sql
+
+    # Standalone `--skip-prices` Stage 4 uses REFRESH_MANAPOOL_BY_SCRYFALL_SQL (`overwrite=True`)
+    standalone_conn = FakeConnection()
+    standalone_sink = sync_catalog.PostgresCatalogSink(standalone_conn)
+    sync_catalog.run_sync_pipeline(
+        standalone_sink,
+        manapool_source=manapool_gz,
+        skip_scryfall=True,
+        skip_identifiers=True,
+        skip_prices=True,
+        skip_prune_sku_cache=True,
+    )
+    standalone_sql, _ = standalone_conn.executed[0]
+    assert "manapool_low_nm = %(manapool_low_nm)s::numeric(10, 2)" in standalone_sql
+    assert "IS DISTINCT FROM" in standalone_sql
 
 
-def test_http_streaming_and_metadata_resolution() -> None:
+def test_http_streaming_and_graceful_manapool_fallback() -> None:
     cards = _sample_scryfall_cards()[:1]
     gz_payload = gzip.compress((json.dumps(cards[0]) + "\n").encode("utf-8"))
 
@@ -294,6 +362,8 @@ def test_http_streaming_and_metadata_resolution() -> None:
             )
         if str(request.url) == "https://data.scryfall.test/default-cards.jsonl.gz":
             return httpx.Response(200, content=gz_payload)
+        if str(request.url) == sync_catalog.MANAPOOL_SINGLES_URL:
+            return httpx.Response(503, text="Service Unavailable")
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handler)
@@ -310,6 +380,17 @@ def test_http_streaming_and_metadata_resolution() -> None:
         )
         assert stats.scryfall_seen == 1
         assert stats.scryfall_upserted == 1
+        assert stats.manapool_fallback_failed is True
+
+        with pytest.raises(httpx.HTTPStatusError):
+            sync_catalog.run_sync_pipeline(
+                sink,
+                skip_scryfall=True,
+                skip_identifiers=True,
+                skip_prices=True,
+                strict_manapool=True,
+                http_client=client,
+            )
 
 
 def test_cli_dry_run_and_missing_database_url_guard(tmp_path: Path) -> None:
@@ -323,6 +404,7 @@ def test_cli_dry_run_and_missing_database_url_guard(tmp_path: Path) -> None:
             str(scryfall_path),
             "--skip-identifiers",
             "--skip-prices",
+            "--skip-manapool",
             "--limit",
             "2",
         ]
@@ -337,6 +419,35 @@ def test_cli_dry_run_and_missing_database_url_guard(tmp_path: Path) -> None:
             str(scryfall_path),
             "--skip-identifiers",
             "--skip-prices",
+            "--skip-manapool",
         ]
     )
     assert rc_no_db == 2
+
+
+def test_database_prepare_env_and_flag_configure_psycopg_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert sync_catalog.should_prepare_statements(env_value="") is True
+    assert sync_catalog.should_prepare_statements(env_value="true") is True
+    assert sync_catalog.should_prepare_statements(env_value="false") is False
+    assert sync_catalog.should_prepare_statements(env_value="0") is False
+    assert sync_catalog.should_prepare_statements(env_value="true", disable_flag=True) is False
+
+    import psycopg
+
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_connect(dsn: str, **kwargs: Any) -> str:
+        captured_calls.append((dsn, kwargs))
+        return "fake-conn"
+
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+
+    sync_catalog.connect_postgres("postgresql://localhost/test", prepare_statements=True)
+    sync_catalog.connect_postgres("postgresql://localhost/test", prepare_statements=False)
+
+    assert captured_calls == [
+        ("postgresql://localhost/test", {}),
+        ("postgresql://localhost/test", {"prepare_threshold": None}),
+    ]
