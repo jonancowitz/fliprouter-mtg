@@ -4,9 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "db:seed": "tsx src/db/seed-demo.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
@@ -14,18 +18,25 @@
     "sync:catalog": "python3 scripts/sync_catalog.py"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.3.16",
+    "clsx": "^2.1.1",
     "drizzle-orm": "^0.44.2",
+    "lucide-react": "^1.73.0",
     "next": "^15.3.0",
     "postgres": "^3.4.7",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.3.4",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/node": "^22.15.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "drizzle-kit": "^0.31.1",
+    "postcss": "^8.5.33",
+    "tailwindcss": "^4.3.5",
+    "tsx": "^4.23.15",
     "typescript": "^5.8.3",
     "vitest": "^3.1.3"
   }

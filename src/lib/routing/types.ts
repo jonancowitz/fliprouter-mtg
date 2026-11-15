@@ -114,6 +114,12 @@ export interface RoutingCardInput {
    * against a vendor pool distinct from Card Kingdom's local `ck_buylist_cash_*`.
    */
   conduitBuylistCashUsd?: string | null;
+  /**
+   * Optional acquisition-date locked Schedule C line-item cost basis (USD) loaded
+   * from persisted `lot_items.allocated_cost_basis_usd`. Preserved across re-routes
+   * whenever all lot items carry locked values summing cent-exact to `purchaseCostUsd`.
+   */
+  lockedAllocatedCostBasisUsd?: string | null;
 }
 
 export type QuarantineReason =

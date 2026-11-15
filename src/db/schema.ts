@@ -67,7 +67,10 @@ export type ConduitTierPreference = (typeof CONDUIT_TIERS)[number];
 export const COLLECTION_LOT_STATUSES = [
   "draft",
   "routed",
+  "triaged",
+  "exported",
   "shipped",
+  "partially_settled",
   "settled",
 ] as const;
 export type CollectionLotStatus = (typeof COLLECTION_LOT_STATUSES)[number];
@@ -226,7 +229,7 @@ export const collectionLots = pgTable(
       .default(sql`CURRENT_DATE`),
     purchaseCostUsd: usdNumeric("purchase_cost_usd").notNull(),
     totalCards: integer("total_cards").notNull().default(0),
-    status: varchar("status", { length: 16 })
+    status: varchar("status", { length: 32 })
       .$type<CollectionLotStatus>()
       .notNull()
       .default("draft"),

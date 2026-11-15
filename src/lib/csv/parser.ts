@@ -664,6 +664,15 @@ export function parseScannerCsv(
   csvInput: string,
   options: { format?: ScannerFormat } = {},
 ): ParseScannerCsvResult {
+  if (
+    options.format !== undefined &&
+    !SCANNER_FORMATS.includes(options.format)
+  ) {
+    throw new CsvParseError(
+      `Unsupported scanner format "${String(options.format)}". Expected one of: ${SCANNER_FORMATS.join(", ")}.`,
+      1,
+    );
+  }
   const { headers, records } = parseCsvMatrix(csvInput);
   const format = options.format ?? detectScannerFormat(headers);
   const normalizedHeaders = headers.map(normalizeHeaderKey);
