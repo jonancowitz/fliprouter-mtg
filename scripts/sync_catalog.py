@@ -777,9 +777,16 @@ def extract_manapool_single(entry: dict[str, Any]) -> ManaPoolSingleRecord | Non
     # Restrict strictly to Near Mint Mana Pool quotes (`price_cents_nm*`); never fall back
     # to unconstrained `price_cents*`, which includes HP/DMG listings and would cause
     # double condition discounting when Step 3 applies non-NM multipliers.
-    nm = parse_cents_to_usd(entry.get("price_cents_nm"))
-    foil = parse_cents_to_usd(entry.get("price_cents_nm_foil"))
-    etched = parse_cents_to_usd(entry.get("price_cents_nm_etched"))
+    nm_raw = parse_cents_to_usd(entry.get("price_cents_nm"))
+    foil_raw = parse_cents_to_usd(entry.get("price_cents_nm_foil"))
+    etched_raw = parse_cents_to_usd(entry.get("price_cents_nm_etched"))
+    nm = nm_raw if nm_raw is not None and nm_raw > Decimal("0.00") else None
+    foil = foil_raw if foil_raw is not None and foil_raw > Decimal("0.00") else None
+    etched = (
+        etched_raw
+        if etched_raw is not None and etched_raw > Decimal("0.00")
+        else None
+    )
 
     record = ManaPoolSingleRecord(
         scryfall_id=scryfall_id,

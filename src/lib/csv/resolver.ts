@@ -5,6 +5,7 @@ import {
   type CardCondition,
   type CardFinish,
   cardCatalog,
+  fromCatalogFinish,
   type SkuPriceCacheItem,
   skuPriceCache,
   toCatalogFinish,
@@ -124,12 +125,23 @@ export function buildSetCollectorCandidates(
     }
   }
 
+  // Lowercase collector-number suffixes (e.g. "117A" -> "117a", "7A" -> "7a") while preserving exact B-tree index lookup
+  for (const variant of [...collectorVariants]) {
+    const lowered = variant.value.toLowerCase();
+    if (
+      lowered !== variant.value &&
+      !collectorVariants.some((v) => v.value === lowered)
+    ) {
+      collectorVariants.push({ value: lowered, normalized: true });
+    }
+  }
+
   const setVariants: Array<{ value: string; normalized: boolean }> = [
     { value: baseSet, normalized: false },
   ];
 
-  // Dragon Shield promo prefix fallback: 4-letter 'pXXX' -> 'XXX' (e.g. 'pmh2' -> 'mh2')
-  if (baseSet.length === 4 && baseSet.startsWith("p")) {
+  // Dragon Shield promo prefix fallback: 'pXXX' / 'pXXXX' -> 'XXX' / 'XXXX' (e.g. 'pmh2' -> 'mh2')
+  if ((baseSet.length === 4 || baseSet.length === 5) && baseSet.startsWith("p")) {
     setVariants.push({ value: baseSet.slice(1), normalized: true });
   }
 
@@ -283,6 +295,24 @@ export function createInMemoryCatalogLookup(
   };
 }
 
+function resolveEffectiveCatalogFinish(
+  requestedFinish: CardFinish,
+  catalogFinishes: readonly string[],
+): CardFinish {
+  if (
+    catalogFinishes.length === 0 ||
+    catalogFinishes.includes(toCatalogFinish(requestedFinish))
+  ) {
+    return requestedFinish;
+  }
+  if (requestedFinish === "foil" && catalogFinishes.includes("etched")) {
+    return "etched";
+  }
+  if (catalogFinishes.length === 1) {
+    return fromCatalogFinish(catalogFinishes[0]!);
+  }
+  return requestedFinish;
+}
 /**
  * Resolves parsed scanner CSV rows against `card_catalog` in batched stages:
  *   1. `scryfall_id`
@@ -478,11 +508,15 @@ export async function resolveParsedCsvRows(
     const row = rows[i]!;
     const matchInfo = matched.get(i);
     if (matchInfo) {
-      const catalogFinish = toCatalogFinish(matchInfo.effectiveFinish);
+      const coercedFinish = resolveEffectiveCatalogFinish(
+        matchInfo.effectiveFinish,
+        matchInfo.card.finishes,
+      );
+      const catalogFinish = toCatalogFinish(coercedFinish);
       resolved.push({
         parsedRow: row,
         card: matchInfo.card,
-        effectiveFinish: matchInfo.effectiveFinish,
+        effectiveFinish: coercedFinish,
         matchedBy: matchInfo.strategy,
         finishListedInCatalog: matchInfo.card.finishes.includes(catalogFinish),
       });
@@ -559,7 +593,7 @@ export async function fetchFreshSkuPriceCacheMap(
       .where(
         and(
           inArray(skuPriceCache.scryfallId, batch),
-          sql`${skuPriceCache.expiresAt} > ${now.toISOString()}`,
+          sql`${skuPriceCache.expiresAt} > ${now.toISOString()}::timestamptz`,
         ),
       )) as SkuPriceCacheItem[];
 

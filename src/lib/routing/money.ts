@@ -127,10 +127,32 @@ export function parseUsdToCents(
   if (raw === null || raw === undefined) {
     return null;
   }
-  const cleaned = raw.trim().replace(/^\$/, "").replace(/,/g, "").trim();
-  if (cleaned === "") {
+  let trimmed = raw.trim();
+  if (trimmed === "") {
     return null;
   }
+
+  let signPrefix = "";
+  if (trimmed.startsWith("-") || trimmed.startsWith("+")) {
+    signPrefix = trimmed[0]!;
+    trimmed = trimmed.slice(1).trim();
+  }
+  if (trimmed.startsWith("$")) {
+    trimmed = trimmed.slice(1).trim();
+  }
+  if (trimmed.startsWith("-") || trimmed.startsWith("+")) {
+    if (signPrefix !== "") {
+      throw new SyntaxError(`Invalid USD decimal string: "${raw}"`);
+    }
+    signPrefix = trimmed[0]!;
+    trimmed = trimmed.slice(1).trim();
+  }
+
+  const strippedDigits = trimmed.replace(/,/g, "");
+  if (strippedDigits === "") {
+    throw new SyntaxError(`Invalid USD decimal string: "${raw}"`);
+  }
+  const cleaned = `${signPrefix}${strippedDigits}`;
   if (!DECIMAL_PATTERN.test(cleaned)) {
     throw new SyntaxError(`Invalid USD decimal string: "${raw}"`);
   }
@@ -182,6 +204,18 @@ export function coalesceUsdToCents(
   return null;
 }
 
+export function coalescePositiveUsdToCents(
+  ...values: Array<string | null | undefined>
+): bigint | null {
+  for (const candidate of values) {
+    const parsed = parseUsdToCents(candidate);
+    if (parsed !== null && parsed > 0n) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
 export function formatCentsToUsd(cents: bigint): string {
   const negative = cents < 0n;
   const abs = absBigInt(cents);
@@ -200,7 +234,9 @@ export interface CostBasisItemWeight {
 }
 
 export interface AllocatedItemCostBasis {
+  /** Per-copy cost basis (`roundHalfUp(totalCostBasisCents / quantity)`). */
   readonly unitCostBasisCents: bigint;
+  /** Line-item Schedule C cost basis (`lot_items.allocated_cost_basis_usd`), summing cent-exact to `purchaseCostCents`. */
   readonly totalCostBasisCents: bigint;
 }
 
@@ -230,7 +266,7 @@ function allocateHamiltonRowTotals(
     remainders.push({ index: i, remainder, weight });
   }
 
-  const missingCents = Number(totalPoolCents - allocatedSum);
+  const missingCents = totalPoolCents - allocatedSum;
   remainders.sort((a, b) => {
     if (a.remainder !== b.remainder) {
       return a.remainder > b.remainder ? -1 : 1;
@@ -241,7 +277,7 @@ function allocateHamiltonRowTotals(
     return a.index - b.index;
   });
 
-  for (let k = 0; k < missingCents && k < remainders.length; k += 1) {
+  for (let k = 0; BigInt(k) < missingCents && k < remainders.length; k += 1) {
     const target = remainders[k]!;
     allocations[target.index] = allocations[target.index]! + 1n;
   }
@@ -250,73 +286,61 @@ function allocateHamiltonRowTotals(
 }
 
 /**
- * Finds a subset of positive-FMV item indices (prioritizing largest fractional
- * unit remainders) whose quantities sum exactly to `targetCents` so that
- * `SUM(quantity_i * unitCostBasisCents_i) === purchaseCostCents` whenever
- * integer-unit cent reconciliation is mathematically possible.
+ * Splits a line item's allocated Schedule C cost basis across a partial sale
+ * (`soldQuantity` out of `totalQuantity`), preserving cent-exact reconciliation
+ * (`soldCostBasisCents + remainingCostBasisCents === rowCostBasisCents`).
  */
-function findExactUnitRemainderSubset(
-  candidates: ReadonlyArray<{ index: number; quantity: number }>,
-  targetCents: number,
-): Set<number> | null {
-  if (targetCents === 0) {
-    return new Set();
+export function splitAllocatedCostBasis(
+  rowCostBasisCents: bigint,
+  totalQuantity: number,
+  soldQuantity: number,
+): {
+  readonly soldCostBasisCents: bigint;
+  readonly remainingCostBasisCents: bigint;
+} {
+  if (rowCostBasisCents < 0n) {
+    throw new RangeError("rowCostBasisCents cannot be negative.");
   }
-  if (targetCents < 0 || targetCents > 4000) {
-    return null;
+  if (!Number.isInteger(totalQuantity) || totalQuantity <= 0) {
+    throw new RangeError(
+      `totalQuantity must be a positive integer (got ${totalQuantity}).`,
+    );
   }
-
-  // Fast path when all candidate quantities are 1
-  if (candidates.every((c) => c.quantity === 1)) {
-    if (candidates.length < targetCents) {
-      return null;
-    }
-    return new Set(candidates.slice(0, targetCents).map((c) => c.index));
+  if (
+    !Number.isInteger(soldQuantity) ||
+    soldQuantity < 0 ||
+    soldQuantity > totalQuantity
+  ) {
+    throw new RangeError(
+      `soldQuantity must be an integer between 0 and ${totalQuantity} (got ${soldQuantity}).`,
+    );
   }
-
-  const prevSum = new Int32Array(targetCents + 1).fill(-1);
-  const pickedCandidatePos = new Int32Array(targetCents + 1).fill(-1);
-  prevSum[0] = 0;
-
-  for (let pos = 0; pos < candidates.length; pos += 1) {
-    const qty = candidates[pos]!.quantity;
-    if (qty <= 0 || qty > targetCents) {
-      continue;
-    }
-    for (let s = targetCents; s >= qty; s -= 1) {
-      if (prevSum[s] === -1 && prevSum[s - qty] !== -1) {
-        prevSum[s] = s - qty;
-        pickedCandidatePos[s] = pos;
-      }
-    }
-    if (prevSum[targetCents] !== -1) {
-      break;
-    }
+  if (soldQuantity === 0 || rowCostBasisCents === 0n) {
+    return { soldCostBasisCents: 0n, remainingCostBasisCents: rowCostBasisCents };
   }
-
-  if (prevSum[targetCents] === -1) {
-    return null;
+  if (soldQuantity === totalQuantity) {
+    return { soldCostBasisCents: rowCostBasisCents, remainingCostBasisCents: 0n };
   }
-
-  const chosen = new Set<number>();
-  let cursor = targetCents;
-  while (cursor > 0) {
-    const pos = pickedCandidatePos[cursor]!;
-    chosen.add(candidates[pos]!.index);
-    cursor = prevSum[cursor]!;
-  }
-  return chosen;
+  const soldCostBasisCents = divRoundHalfUp(
+    rowCostBasisCents * BigInt(soldQuantity),
+    BigInt(totalQuantity),
+  );
+  return {
+    soldCostBasisCents,
+    remainingCostBasisCents: rowCostBasisCents - soldCostBasisCents,
+  };
 }
 
 /**
- * Computes proportional IRS Schedule C Fair Market Value cost basis per item.
+ * Computes proportional IRS Schedule C Fair Market Value cost basis per line item
+ * (`SPEC.md` §4.D):
  *
- * - `totalCostBasisCents` always sums cent-for-cent to `purchaseCostCents`
- *   whenever total lot FMV > 0.
- * - `unitCostBasisCents` implements `C_lot * (V_i / V_total)` (`SPEC.md` §4.D)
- *   and reconciles `SUM(q_i * unitCostBasisCents_i) === purchaseCostCents`
- *   whenever integer-quantity cent division permits (including all `q_i = 1`
- *   and mixed-quantity lots with unit-resolvable remainders).
+ * - `totalCostBasisCents` allocates `C_lot * (q_i * V_i / V_total)` via the
+ *   Largest-Remainder (Hamilton) method so persisted `lot_items.allocated_cost_basis_usd`
+ *   always sums cent-for-cent to `purchaseCostCents` whenever `V_total > 0`,
+ *   regardless of multi-copy quantities (`q_i > 1`).
+ * - `unitCostBasisCents` provides the half-up per-copy cost basis
+ *   (`roundHalfUp(totalCostBasisCents / q_i)`).
  */
 export function allocateScheduleCCostBasis(
   purchaseCostCents: bigint,
@@ -351,71 +375,6 @@ export function allocateScheduleCCostBasis(
     }));
   }
 
-  const unitFloors = new Array<bigint>(items.length).fill(0n);
-  const unitCandidates: Array<{
-    index: number;
-    quantity: number;
-    remainder: bigint;
-    unitFmv: bigint;
-  }> = [];
-
-  let floorWeightedUnitSum = 0n;
-  for (let i = 0; i < items.length; i += 1) {
-    const item = items[i]!;
-    const unitFmv = item.unitFmvCents > 0n ? item.unitFmvCents : 0n;
-    if (unitFmv === 0n) {
-      continue;
-    }
-    const numerator = purchaseCostCents * unitFmv;
-    const unitFloor = numerator / totalFmvCents;
-    const unitRemainder = numerator % totalFmvCents;
-    unitFloors[i] = unitFloor;
-    floorWeightedUnitSum += BigInt(item.quantity) * unitFloor;
-    unitCandidates.push({
-      index: i,
-      quantity: item.quantity,
-      remainder: unitRemainder,
-      unitFmv,
-    });
-  }
-
-  unitCandidates.sort((a, b) => {
-    if (a.remainder !== b.remainder) {
-      return a.remainder > b.remainder ? -1 : 1;
-    }
-    if (a.unitFmv !== b.unitFmv) {
-      return a.unitFmv > b.unitFmv ? -1 : 1;
-    }
-    if (a.quantity !== b.quantity) {
-      return a.quantity - b.quantity;
-    }
-    return a.index - b.index;
-  });
-
-  const missingUnitWeightedCents = purchaseCostCents - floorWeightedUnitSum;
-  const exactSubset =
-    missingUnitWeightedCents >= 0n &&
-    missingUnitWeightedCents <= BigInt(Number.MAX_SAFE_INTEGER)
-      ? findExactUnitRemainderSubset(
-          unitCandidates,
-          Number(missingUnitWeightedCents),
-        )
-      : null;
-
-  if (exactSubset !== null) {
-    return items.map((item, idx) => {
-      const unitBasis = unitFloors[idx]! + (exactSubset.has(idx) ? 1n : 0n);
-      return {
-        unitCostBasisCents: unitBasis,
-        totalCostBasisCents: BigInt(item.quantity) * unitBasis,
-      };
-    });
-  }
-
-  // Fallback when all positive-FMV quantities share a GCD that does not divide
-  // `purchaseCostCents` (e.g. a single 3x row on a $10.00 lot): compute exact
-  // half-up unit basis per SPEC.md §4.D and exact Hamilton row totals summing
-  // to `purchaseCostCents`.
   const hamiltonRowTotals = allocateHamiltonRowTotals(
     purchaseCostCents,
     rowWeights,
@@ -423,14 +382,14 @@ export function allocateScheduleCCostBasis(
   );
 
   return items.map((item, idx) => {
-    const unitFmv = item.unitFmvCents > 0n ? item.unitFmvCents : 0n;
-    const unitBasis =
-      unitFmv > 0n
-        ? divRoundHalfUp(purchaseCostCents * unitFmv, totalFmvCents)
+    const rowTotalCents = hamiltonRowTotals[idx]!;
+    const unitBasisCents =
+      rowTotalCents > 0n
+        ? divRoundHalfUp(rowTotalCents, BigInt(item.quantity))
         : 0n;
     return {
-      unitCostBasisCents: unitBasis,
-      totalCostBasisCents: hamiltonRowTotals[idx]!,
+      unitCostBasisCents: unitBasisCents,
+      totalCostBasisCents: rowTotalCents,
     };
   });
 }

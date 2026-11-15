@@ -13,6 +13,7 @@ import {
   parseUsdToCents,
   resolveChannelBaselines,
   routeCollectionLot,
+  splitAllocatedCostBasis,
 } from "@/lib/routing/engine";
 import type { CatalogPriceFields, SkuCacheFields } from "@/lib/routing/types";
 
@@ -72,10 +73,15 @@ describe("Zero-Float Integer Cents & Exact Rational Math", () => {
     expect(parseUsdToCents("1.235")).toBe(124n);
     expect(parseUsdToCents("1.2349")).toBe(123n);
     expect(parseUsdToCents("-0.85")).toBe(-85n);
+    expect(parseUsdToCents("-$12.34")).toBe(-1234n);
+    expect(parseUsdToCents("+$12.34")).toBe(1234n);
+    expect(parseUsdToCents("$-12.34")).toBe(-1234n);
     expect(formatCentsToUsd(-85n)).toBe("-0.85");
     expect(parseUsdToCents(null)).toBeNull();
     expect(parseUsdToCents("   ")).toBeNull();
     expect(() => parseUsdToCents("abc")).toThrow(SyntaxError);
+    expect(() => parseUsdToCents("$")).toThrow(SyntaxError);
+    expect(() => parseUsdToCents("--5.00")).toThrow(SyntaxError);
   });
 
   it("applies symmetric half-up rational division on exact midpoints", () => {
@@ -166,6 +172,22 @@ describe("Condition Multipliers, Foil Wear Penalty, & Buylist Quarantine", () =>
       isAltered: true,
     });
     expect(cheapAltered.assignedBucket).toBe("PILE_4_BULK");
+
+    // Boundary P2P inclusion in Net_BestSingle ($2.65 foreign card: Net_TCG=$0.10, Net_MP=$0.24, Net_P2P=$0.77 >= $0.75) -> PILE_2_SINGLES (p2p_85_pct)
+    const p2pFloorRescue = evaluateCardRouting({
+      card: makeCard({
+        tcgMarketNm: "2.65",
+        manapoolLowNm: "2.65",
+        tcgLowNm: "2.65",
+        ckBuylistCashNm: "1.80",
+      }),
+      language: "ja",
+    });
+    expect(p2pFloorRescue.nets.netTcgplayerSingleUsd).toBe("0.10");
+    expect(p2pFloorRescue.nets.netManapoolSingleUsd).toBe("0.24");
+    expect(p2pFloorRescue.nets.netP2p85PctUsd).toBe("0.77");
+    expect(p2pFloorRescue.assignedBucket).toBe("PILE_2_SINGLES");
+    expect(p2pFloorRescue.recommendedChannel).toBe("p2p_85_pct");
   });
 });
 
@@ -248,11 +270,16 @@ describe("Channel Baselines, Etched Hierarchy, 24h SKU Cache, & Paid API Eligibi
     expect(expiredResolved.pRetailTcgUsd).toBe("17.60"); // 20.00 * 0.88
   });
 
-  it("enforces Pro-tier paid SKU API eligibility (finish-specific NM >= $8.00, non-NM, non-DMG, quota, cache)", () => {
-    // $1.00 nonfoil / $40.00 foil card
-    const foilStaple = makeCard({
-      tcgMarketNm: "1.00",
+  it("enforces Pro-tier paid SKU API eligibility (NM >= $8.00 OR non-quarantined LP/MP/HP >= $1.00, quota rollover, cache)", () => {
+    const now = new Date("2026-11-15T12:00:00Z");
+    // $4.00 nonfoil / $40.00 foil card, plus $0.50 bulk card
+    const midNonfoilHighFoil = makeCard({
+      tcgMarketNm: "4.00",
       tcgMarketFoil: "40.00",
+    });
+    const subDollarBulk = makeCard({
+      tcgMarketNm: "0.50",
+      tcgMarketFoil: "0.75",
     });
     const proProfile = {
       monthlySkuApiQuota: 2500,
@@ -262,15 +289,32 @@ describe("Channel Baselines, Etched Hierarchy, 24h SKU Cache, & Paid API Eligibi
     // LP foil ($40 NM foil baseline >= $8.00) -> ELIGIBLE
     expect(
       evaluatePaidSkuApiEligibility(
-        { card: foilStaple, finish: "foil", condition: "LP" },
+        { card: midNonfoilHighFoil, finish: "foil", condition: "LP" },
         proProfile,
       ),
     ).toMatchObject({ eligible: true, nmBaselineUsd: "40.00" });
 
-    // LP normal ($1.00 NM baseline < $8.00) -> SKIPPED (below_nm_price_threshold)
+    // NM foil ($40 NM foil baseline >= $8.00) -> ELIGIBLE under SPEC.md §2.3 OR rule
     expect(
       evaluatePaidSkuApiEligibility(
-        { card: foilStaple, finish: "normal", condition: "LP" },
+        { card: midNonfoilHighFoil, finish: "foil", condition: "NM" },
+        proProfile,
+      ),
+    ).toMatchObject({ eligible: true, nmBaselineUsd: "40.00" });
+
+    // NM foil when caller explicitly opts out of high-value NM (`includeHighValueNm: false`) -> SKIPPED
+    expect(
+      evaluatePaidSkuApiEligibility(
+        { card: midNonfoilHighFoil, finish: "foil", condition: "NM" },
+        proProfile,
+        { includeHighValueNm: false },
+      ),
+    ).toMatchObject({ eligible: false, skipReason: "near_mint_condition" });
+
+    // NM normal ($4.00 NM baseline < $8.00) -> SKIPPED (resolved locally via card_catalog)
+    expect(
+      evaluatePaidSkuApiEligibility(
+        { card: midNonfoilHighFoil, finish: "normal", condition: "NM" },
         proProfile,
       ),
     ).toMatchObject({
@@ -278,29 +322,95 @@ describe("Channel Baselines, Etched Hierarchy, 24h SKU Cache, & Paid API Eligibi
       skipReason: "below_nm_price_threshold",
     });
 
-    // NM foil -> SKIPPED (near_mint_condition)
+    // LP normal ($4.00 NM baseline >= $1.00, non-NM condition) -> ELIGIBLE
     expect(
       evaluatePaidSkuApiEligibility(
-        { card: foilStaple, finish: "foil", condition: "NM" },
+        { card: midNonfoilHighFoil, finish: "normal", condition: "LP" },
         proProfile,
       ),
-    ).toMatchObject({ eligible: false, skipReason: "near_mint_condition" });
+    ).toMatchObject({ eligible: true, nmBaselineUsd: "4.00" });
+
+    // LP sub-dollar bulk ($0.50 NM baseline < $1.00) -> SKIPPED so quota is never wasted on bulk
+    expect(
+      evaluatePaidSkuApiEligibility(
+        { card: subDollarBulk, finish: "normal", condition: "LP" },
+        proProfile,
+      ),
+    ).toMatchObject({
+      eligible: false,
+      skipReason: "below_nm_price_threshold",
+    });
 
     // DMG foil -> SKIPPED (quarantined_item)
     expect(
       evaluatePaidSkuApiEligibility(
-        { card: foilStaple, finish: "foil", condition: "DMG" },
+        { card: midNonfoilHighFoil, finish: "foil", condition: "DMG" },
         proProfile,
       ),
     ).toMatchObject({ eligible: false, skipReason: "quarantined_item" });
 
-    // Exhausted quota -> SKIPPED (quota_exhausted)
+    // Exhausted quota in active billing cycle -> SKIPPED (quota_exhausted)
     expect(
       evaluatePaidSkuApiEligibility(
-        { card: foilStaple, finish: "foil", condition: "LP" },
-        { monthlySkuApiQuota: 2500, monthlySkuApiUsed: 2500 },
+        { card: midNonfoilHighFoil, finish: "foil", condition: "LP" },
+        {
+          monthlySkuApiQuota: 2500,
+          monthlySkuApiUsed: 2500,
+          skuApiQuotaResetAt: new Date("2026-12-01T00:00:00Z"),
+        },
+        { now },
       ),
     ).toMatchObject({ eligible: false, skipReason: "quota_exhausted" });
+
+    // Elapsed skuApiQuotaResetAt (`<= now`) rolls monthly usage back to 0 -> ELIGIBLE
+    expect(
+      evaluatePaidSkuApiEligibility(
+        { card: midNonfoilHighFoil, finish: "foil", condition: "LP" },
+        {
+          monthlySkuApiQuota: 2500,
+          monthlySkuApiUsed: 2500,
+          skuApiQuotaResetAt: new Date("2026-11-01T00:00:00Z"),
+        },
+        { now },
+      ),
+    ).toMatchObject({ eligible: true });
+  });
+
+  it("ignores '0.00' retail placeholders during coalescing and preserves custom catalog credit on retail-only SKU cache hits", () => {
+    const now = new Date("2026-11-15T12:00:00Z");
+    const card = makeCard({
+      tcgMarketNm: "12.00",
+      manapoolLowNm: "0.00",
+      tcgLowNm: "0.00",
+      ckBuylistCashNm: "6.00",
+      ckBuylistCreditNm: "6.00", // Custom 1.00x store credit instead of 1.30x
+    });
+
+    const localBaselines = resolveChannelBaselines({ card });
+    expect(localBaselines.pRetailMpUsd).toBe("12.00");
+    expect(localBaselines.pRetailP2pUsd).toBe("12.00");
+
+    const retailOnlyCacheHit = evaluateCardRouting(
+      {
+        card,
+        skuPriceCache: {
+          scryfallId: card.scryfallId,
+          finish: "normal",
+          condition: "NM",
+          retailLowUsd: "0.00",
+          retailMarketUsd: "11.50",
+          buylistCashUsd: null,
+          buylistCreditUsd: null,
+          source: "tcgapis",
+          expiresAt: new Date("2026-11-16T00:00:00Z"),
+        },
+      },
+      { enableCreditArbitrage: true },
+      { now },
+    );
+    expect(retailOnlyCacheHit.baselines.pRetailMpUsd).toBe("11.50");
+    // Custom catalog credit $6.00 * 0.82 = $4.92 (NOT $6.00 * 1.066 = $6.40)
+    expect(retailOnlyCacheHit.nets.netCkCreditUsd).toBe("4.92");
   });
 });
 
@@ -340,6 +450,13 @@ describe("Exact Per-Card Fee & Payout Formulas", () => {
     });
     expect(belowCap.nets.netTcgplayerSingleUsd).toBe("599.68");
 
+    // At $697.68: 697.68 * 0.1075 = $75.0006 -> capped at exactly $75.00!
+    // Net_TCG = 697.68 - 75.00 - (697.68 * 0.025 = 17.442) - 0.30 - 4.25 - 1.00 = 599.688 -> $599.69
+    const exactCapCrossover = evaluateCardRouting({
+      card: makeCard({ tcgMarketNm: "697.68", ckBuylistCashNm: "400.00" }),
+    });
+    expect(exactCapCrossover.nets.netTcgplayerSingleUsd).toBe("599.69");
+
     // At $800.00: 10.75% uncapped would be $86.00, capped at $75.00!
     // Net_TCG = 800.00 - 75.00 - (800.00 * 0.025 = 20.00) - 0.30 - 4.25 - 1.00 = $699.45
     const aboveCap = evaluateCardRouting({
@@ -348,7 +465,18 @@ describe("Exact Per-Card Fee & Payout Formulas", () => {
     expect(aboveCap.nets.netTcgplayerSingleUsd).toBe("699.45");
   });
 
-  it("evaluates C_ship per channel sale price (including P2P 85% claim sale price vs $25.00 threshold)", () => {
+  it("evaluates C_ship per channel sale price (including exact $24.99 vs $25.00 cutoff and P2P 85% claim sale price)", () => {
+    const at2499 = evaluateCardRouting({
+      card: makeCard({ tcgMarketNm: "24.99", manapoolLowNm: "24.99" }),
+    });
+    expect(at2499.nets.shipTcgUsd).toBe("0.90");
+    expect(at2499.nets.shipMpUsd).toBe("0.90");
+
+    const at2500 = evaluateCardRouting({
+      card: makeCard({ tcgMarketNm: "25.00", manapoolLowNm: "25.00" }),
+    });
+    expect(at2500.nets.shipTcgUsd).toBe("4.25");
+    expect(at2500.nets.shipMpUsd).toBe("4.25");
     // At $28.00 retail: TCG & MP >= $25.00 ($4.25 tracked), while P2P sale price = $28 * 0.85 = $23.80 < $25.00 ($0.90 PWE)!
     const res = evaluateCardRouting({
       card: makeCard({
@@ -503,8 +631,8 @@ describe("Lot-Level Outbound Box Postage Guardrail & Schedule C COGS Allocation"
     expect(lot.summary.estimatedNetRoiPct).toBe("38.13");
   });
 
-  it("charges two $12.00 boxes ($24.00) when PILE_1_BUYLIST ships to Card Conduit and PILE_3_CREDIT_ARB ships to Card Kingdom", () => {
-    // 10x Conduit Sorted winner ($6.00 multi-vendor quote * 0.98 = $5.88 > CK $4.00 & CK Credit $4.26, vs $3.52 P2P single)
+  it("charges two $12.00 boxes ($24.00) when both Card Conduit and Card Kingdom earn >$12.00 incremental margin", () => {
+    // 10x Conduit Sorted winner ($6.00 multi-vendor quote * 0.98 = $5.88 > CK $4.00 & CK Credit $4.26 -> +$16.20 over CK > $12 box)
     const conduitCard = makeCard({
       scryfallId: "33333333-3333-4333-8333-333333333333",
       tcgMarketNm: "6.00",
@@ -512,7 +640,7 @@ describe("Lot-Level Outbound Box Postage Guardrail & Schedule C COGS Allocation"
       ckBuylistCashNm: "4.00",
     });
 
-    // 20x CK Credit Arb winner ($6.80 CK cash -> $7.25 credit arb vs $5.80 P2P single -> +$29.00 over singles > $12 box)
+    // 25x CK Credit Arb winner ($6.80 CK cash -> $7.25 credit arb vs $6.66 Conduit Sorted -> 25 * $0.59 = +$14.75 over Conduit > $12 box)
     const ckCreditCard = makeCard({
       scryfallId: "44444444-4444-4444-8444-444444444444",
       tcgMarketNm: "8.80",
@@ -528,17 +656,97 @@ describe("Lot-Level Outbound Box Postage Guardrail & Schedule C COGS Allocation"
       },
       items: [
         { card: conduitCard, quantity: 10, conduitBuylistCashUsd: "6.00" },
-        { card: ckCreditCard, quantity: 20 },
+        { card: ckCreditCard, quantity: 25 },
       ],
     });
 
     expect(lot.summary.buckets.PILE_1_BUYLIST.totalCards).toBe(10);
-    expect(lot.summary.buckets.PILE_3_CREDIT_ARB.totalCards).toBe(20);
+    expect(lot.summary.buckets.PILE_3_CREDIT_ARB.totalCards).toBe(25);
     expect(lot.summary.outboundBoxCount).toBe(2);
     expect(lot.summary.outboundBoxShippingUsd).toBe("24.00");
   });
 
-  it("charges two $12.00 boxes when shipping to both Card Conduit and Card Kingdom, and demotes tiny buylist piles whose gain cannot cover postage", () => {
+  it("cascades tiny unviable vendor boxes into the surviving buylist vendor (Conduit -> CK Credit/Cash and CK Credit -> Conduit) rather than dumping to Singles/Bulk", () => {
+    // Case A: 20x viable CK Credit cards + 2x tiny Conduit cards ($5.88 Conduit vs $5.86 CK Credit vs $3.52 P2P Single)
+    // Keeping a 2nd $12 Conduit box for 2 cards loses money; dumping to Singles ($3.52) wastes $2.34/card; cascading into the existing CK box earns $5.86/card with $0 extra box postage!
+    const viableCkCard = makeCard({
+      scryfallId: "55555555-5555-4555-8555-555555555555",
+      tcgMarketNm: "8.80",
+      manapoolLowNm: "8.80",
+      ckBuylistCashNm: "6.80",
+    });
+    const tinyConduitCard = makeCard({
+      scryfallId: "66666666-6666-4666-8666-666666666666",
+      tcgMarketNm: "6.00",
+      manapoolLowNm: "6.00",
+      ckBuylistCashNm: "5.50", // CK Credit = $5.50 * 1.066 = $5.86
+    });
+
+    const cascadedToCk = routeCollectionLot({
+      purchaseCostUsd: "100.00",
+      profile: {
+        enableCreditArbitrage: true,
+        conduitTierPreference: "sorted",
+      },
+      items: [
+        { card: viableCkCard, quantity: 20, conduitBuylistCashUsd: "4.00" },
+        { card: tinyConduitCard, quantity: 2, conduitBuylistCashUsd: "6.00" },
+      ],
+    });
+
+    expect(cascadedToCk.summary.outboundBoxCount).toBe(1);
+    expect(cascadedToCk.summary.outboundBoxShippingUsd).toBe("12.00");
+    expect(cascadedToCk.items[1]!.initialRecommendedChannel).toBe(
+      "conduit_sorted",
+    );
+    expect(cascadedToCk.items[1]!.assignedBucket).toBe("PILE_3_CREDIT_ARB");
+    expect(cascadedToCk.items[1]!.recommendedChannel).toBe("ck_credit");
+    expect(cascadedToCk.items[1]!.optimalUnitNetUsd).toBe("5.86");
+    expect(cascadedToCk.items[1]!.demotedFromBuylistByPostageGuard).toBe(true);
+
+    // Case B: 30x viable Conduit Sorted cards + 1x cheap CK Credit card ($1.00 retail -> Net_BestSingle < $0.75 so non-buylist fallback is $0.00 Bulk, CK cash $1.00 -> $1.07 credit vs $0.98 Conduit Sorted)
+    // Cascading that 1 card into the open Conduit box rescues $0.98 instead of demoting it to $0.00 PILE_4_BULK!
+    const viableConduitCard = makeCard({
+      scryfallId: "77777777-7777-4777-8777-777777777777",
+      tcgMarketNm: "6.00",
+      manapoolLowNm: "6.00",
+      ckBuylistCashNm: "3.00",
+    });
+    const loneCkCreditCard = makeCard({
+      scryfallId: "88888888-8888-4888-8888-888888888888",
+      tcgMarketNm: "1.50",
+      manapoolLowNm: "1.50",
+      ckBuylistCashNm: "1.00",
+    });
+
+    const cascadedToConduit = routeCollectionLot({
+      purchaseCostUsd: "60.00",
+      profile: {
+        enableCreditArbitrage: true,
+        conduitTierPreference: "sorted",
+      },
+      items: [
+        {
+          card: viableConduitCard,
+          quantity: 30,
+          conduitBuylistCashUsd: "5.50",
+        },
+        { card: loneCkCreditCard, quantity: 1 },
+      ],
+    });
+
+    expect(cascadedToConduit.summary.outboundBoxCount).toBe(1);
+    expect(cascadedToConduit.items[1]!.initialAssignedBucket).toBe(
+      "PILE_3_CREDIT_ARB",
+    );
+    expect(cascadedToConduit.items[1]!.assignedBucket).toBe("PILE_1_BUYLIST");
+    expect(cascadedToConduit.items[1]!.recommendedChannel).toBe(
+      "conduit_sorted",
+    );
+    expect(cascadedToConduit.items[1]!.optimalUnitNetUsd).toBe("0.98");
+  });
+
+  it("demotes tiny single-vendor buylist piles (including exact $12.00 postage ties) to non-buylist fallbacks", () => {
     // Tiny buylist lot: 2 copies @ $3.00 CK Cash ($6.00 gross buylist) vs $2.52 P2P single ($5.04 fallback)
     // Buylist after $12 box = -$6.00 <= $5.04 -> MUST demote to PILE_2_SINGLES!
     const tinyCard = makeCard({
@@ -556,10 +764,23 @@ describe("Lot-Level Outbound Box Postage Guardrail & Schedule C COGS Allocation"
     expect(demotedLot.items[0]!.assignedBucket).toBe("PILE_2_SINGLES");
     expect(demotedLot.summary.outboundBoxCount).toBe(0);
     expect(demotedLot.summary.outboundBoxShippingUsd).toBe("0.00");
+
+    // Exact tie: 12 copies @ $1.00 CK Cash ($12.00 gross buylist) vs $0.00 Bulk fallback, $12.00 box shipping -> $12 - $12 === $0 -> demotes on `<=`!
+    const exactTieLot = routeCollectionLot({
+      purchaseCostUsd: "5.00",
+      items: [
+        {
+          card: makeCard({ tcgMarketNm: "1.50", ckBuylistCashNm: "1.00" }),
+          quantity: 12,
+        },
+      ],
+    });
+    expect(exactTieLot.summary.outboundBoxCount).toBe(0);
+    expect(exactTieLot.items[0]!.assignedBucket).toBe("PILE_4_BULK");
   });
 
-  it("allocates cent-exact IRS Schedule C COGS summing to purchaseCostUsd across equal, uneven, and multi-quantity rows", () => {
-    // 1. Classic 3-way split ($100.00 across three $10.00 items -> $33.34 + $33.33 + $33.33 = $100.00)
+  it("allocates cent-exact line-item IRS Schedule C COGS summing to purchaseCostUsd across equal, prime-quantity, and bulk rows", () => {
+    // 1. Classic 3-way split ($100.00 across three 1x $10.00 items -> $33.34 + $33.33 + $33.33 = $100.00)
     const threeWay = routeCollectionLot({
       purchaseCostUsd: "100.00",
       items: [
@@ -575,22 +796,47 @@ describe("Lot-Level Outbound Box Postage Guardrail & Schedule C COGS Allocation"
     ]);
     expect(threeWay.summary.allocatedCostBasisSumUsd).toBe("100.00");
 
-    // 2. Mixed quantities: Row 1 has 2x $10, Row 2 has 1x $10, purchaseCost = $10.00
-    // Unit bases: $3.33 (x2 = $6.66) + $3.34 (x1 = $3.34) = $10.00 exact!
+    // 2. Mixed quantities: Row 1 has 2x $10 ($20 FMV = 66.67%), Row 2 has 1x $10 ($10 FMV = 33.33%), purchaseCost = $10.00
+    // Largest-Remainder (Hamilton) line-item bases: $6.67 + $3.33 = $10.00 exact!
     const mixedQty = allocateScheduleCCostBasis(1000n, [
       { quantity: 2, unitFmvCents: 1000n },
       { quantity: 1, unitFmvCents: 1000n },
     ]);
     expect(mixedQty[0]).toEqual({
-      unitCostBasisCents: 333n,
-      totalCostBasisCents: 666n,
+      unitCostBasisCents: 334n,
+      totalCostBasisCents: 667n,
     });
     expect(mixedQty[1]).toEqual({
-      unitCostBasisCents: 334n,
-      totalCostBasisCents: 334n,
+      unitCostBasisCents: 333n,
+      totalCostBasisCents: 333n,
     });
 
-    // 3. Zero-FMV lot -> $0.00 basis without division by zero
+    // 3. Prime-quantity 3x row on $10.00 lot + 1,000x bulk row on $3.00 lot:
+    // Persisted `toNewLotItems` `allocatedCostBasisUsd` reconciles cent-for-cent to `purchaseCostUsd` without losing COGS!
+    const primeQtyLot = routeCollectionLot({
+      purchaseCostUsd: "10.00",
+      items: [{ card: makeCard({ tcgMarketNm: "5.00" }), quantity: 3 }],
+    });
+    expect(primeQtyLot.items[0]!.allocatedCostBasisUsd).toBe("10.00");
+    expect(primeQtyLot.items[0]!.unitAllocatedCostBasisUsd).toBe("3.33");
+    expect(
+      primeQtyLot.toNewLotItems("lot-1")[0]!.allocatedCostBasisUsd,
+    ).toBe("10.00");
+
+    const highQtyBulkLot = routeCollectionLot({
+      purchaseCostUsd: "3.00",
+      items: [{ card: makeCard({ tcgMarketNm: "0.10", ckBuylistCashNm: null }), quantity: 1000 }],
+    });
+    expect(highQtyBulkLot.items[0]!.allocatedCostBasisUsd).toBe("3.00");
+    expect(highQtyBulkLot.items[0]!.unitAllocatedCostBasisUsd).toBe("0.00");
+
+    // Partial-row tax-period sale split preserves exact cent sum (`$3.33 + $6.67 === $10.00`)
+    expect(splitAllocatedCostBasis(1000n, 3, 1)).toEqual({
+      soldCostBasisCents: 333n,
+      remainingCostBasisCents: 667n,
+    });
+
+    // 4. Zero-FMV lot -> $0.00 basis without division by zero
     const zeroFmv = allocateScheduleCCostBasis(5000n, [
       { quantity: 4, unitFmvCents: 0n },
     ]);
