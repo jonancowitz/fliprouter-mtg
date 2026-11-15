@@ -11,6 +11,7 @@ import {
   formatCentsToUsd,
   mulCentsByRatioHalfUp,
   parseRequiredUsdToCents,
+  parseUsdToCents,
 } from "@/lib/routing/money";
 import type { CatalogPriceFields, RoutedLotItem } from "@/lib/routing/types";
 
@@ -120,15 +121,38 @@ export class CardConduitValidationError extends Error {
   }
 }
 
-export function escapeCsvCell(value: string | number | null | undefined): string {
+const PURE_NEGATIVE_NUMBER_REGEX = /^-\d+(?:\.\d+)?$/;
+const FORMULA_INJECTION_PREFIX_REGEX = /^[=+\-@]|^[\t\r]|^[ ]+[=+\-@]/;
+
+export function isFormulaInjectionRisk(value: string): boolean {
+  if (value === "" || PURE_NEGATIVE_NUMBER_REGEX.test(value)) {
+    return false;
+  }
+  return FORMULA_INJECTION_PREFIX_REGEX.test(value);
+}
+
+function compareStringsAscii(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+export function escapeCsvCell(
+  value: string | number | null | undefined,
+): string {
   if (value === null || value === undefined) {
     return "";
   }
-  const str = String(value);
-  if (/[",\r\n]/.test(str)) {
-    return `"${str.replace(/"/g, '""')}"`;
+  if (typeof value === "number") {
+    return String(value);
   }
-  return str;
+  if (isFormulaInjectionRisk(value)) {
+    const neutralized = `'${value}`;
+    return `"${neutralized.replace(/"/g, '""')}"`;
+  }
+  if (/[",\r\n]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
 }
 
 export function serializeCsv(
@@ -179,9 +203,7 @@ export interface CardConduitExportOptions {
 }
 
 function getEffectiveConduitPBuyCents(item: ExportableLotItem): bigint {
-  return item.baselines.pBuyConduitCents > 0n
-    ? item.baselines.pBuyConduitCents
-    : item.baselines.pBuyCkCents;
+  return item.baselines.pBuyConduitCents;
 }
 
 function filterConduitItems(
@@ -225,13 +247,13 @@ export function validateCardConduitShipment(
     }
   }
 
-  const eligiblePctBps =
+  const roundedPctBps =
     totalCards > 0
       ? divRoundHalfUp(BigInt(eligibleCards) * 10_000n, BigInt(totalCards))
       : 10_000n;
-  const eligiblePercentage = formatBasisPointsToPercent(eligiblePctBps);
 
   if (totalCards === 0 || tier === "standard") {
+    const eligiblePercentage = formatBasisPointsToPercent(roundedPctBps);
     return {
       valid: true,
       tier,
@@ -244,6 +266,9 @@ export function validateCardConduitShipment(
 
   if (tier === "sorted") {
     const valid = eligibleCards === totalCards;
+    const displayBps =
+      !valid && roundedPctBps >= 10_000n ? 9_999n : roundedPctBps;
+    const eligiblePercentage = formatBasisPointsToPercent(displayBps);
     return {
       valid,
       tier,
@@ -259,6 +284,9 @@ export function validateCardConduitShipment(
 
   // tier === "curated": >= 90% of total quantity must have P_buy >= $0.50
   const valid = BigInt(eligibleCards) * 100n >= BigInt(totalCards) * 90n;
+  const displayBps =
+    !valid && roundedPctBps >= 9_000n ? 8_999n : roundedPctBps;
+  const eligiblePercentage = formatBasisPointsToPercent(displayBps);
   return {
     valid,
     tier,
@@ -358,11 +386,18 @@ export function exportCardConduitCsv(
     if (pA !== pB) {
       return pA > pB ? -1 : 1;
     }
-    const byName = a.card.name.localeCompare(b.card.name);
+    const byName = compareStringsAscii(a.card.name, b.card.name);
     if (byName !== 0) return byName;
-    const bySet = a.card.setCode.localeCompare(b.card.setCode);
+    const bySet = compareStringsAscii(a.card.setCode, b.card.setCode);
     if (bySet !== 0) return bySet;
-    return a.card.collectorNumber.localeCompare(b.card.collectorNumber);
+    const byCn = compareStringsAscii(
+      a.card.collectorNumber,
+      b.card.collectorNumber,
+    );
+    if (byCn !== 0) return byCn;
+    const byFinish = compareStringsAscii(a.finish, b.finish);
+    if (byFinish !== 0) return byFinish;
+    return compareStringsAscii(a.condition, b.condition);
   });
 
   const rawBatches: Array<{
@@ -673,6 +708,10 @@ const P2P_PRICE_TIERS: readonly PriceTierDefinition[] = [
   },
 ];
 
+function sanitizeMarkdownInline(text: string): string {
+  return text.replace(/[\r\n]+/g, " ").trim();
+}
+
 /**
  * Generates copy-pasteable Discord / Facebook "85% TCG Low" Claim-Sale Markdown
  * (`SPEC.md` §5.5), grouped cleanly by claim price tier.
@@ -692,7 +731,9 @@ export function exportP2pClaimMarkdown(
       item.baselines.pRetailP2pUsd,
       "pRetailP2pUsd",
     );
-    const claimCents = mulCentsByRatioHalfUp(retailCents, 85n, 100n);
+    const precomputedClaim = parseUsdToCents(item.baselines.pSaleP2pClaimUsd);
+    const claimCents =
+      precomputedClaim ?? mulCentsByRatioHalfUp(retailCents, 85n, 100n);
     return {
       item,
       retailCents,
@@ -706,7 +747,7 @@ export function exportP2pClaimMarkdown(
     if (a.claimCents !== b.claimCents) {
       return a.claimCents > b.claimCents ? -1 : 1;
     }
-    return a.item.card.name.localeCompare(b.item.card.name);
+    return compareStringsAscii(a.item.card.name, b.item.card.name);
   });
 
   let totalCards = 0;
@@ -766,7 +807,10 @@ export function exportP2pClaimMarkdown(
       }
       const tagSuffix =
         extraTags.length > 0 ? `, ${extraTags.join("/")}` : "";
-      return `${item.quantity}x ${item.card.name} (${item.card.setCode.toUpperCase()} #${item.card.collectorNumber} - ${item.condition}/${finishLabel}${tagSuffix}) — TCG Low: $${retailUsd} -> Claim: $${claimUsd}`;
+      const safeName = sanitizeMarkdownInline(item.card.name);
+      const safeSet = sanitizeMarkdownInline(item.card.setCode.toUpperCase());
+      const safeCn = sanitizeMarkdownInline(item.card.collectorNumber);
+      return `${item.quantity}x ${safeName} (${safeSet} #${safeCn} - ${item.condition}/${finishLabel}${tagSuffix}) — TCG Low: $${retailUsd} -> Claim: $${claimUsd}`;
     });
 
     sections.push(`${tier.heading}\n${lines.join("\n")}`);

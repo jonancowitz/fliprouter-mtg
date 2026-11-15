@@ -125,6 +125,19 @@ def test_parse_usd_cents_and_ck_credit_use_exact_decimal_math() -> None:
     assert sync_catalog.parse_cents_to_usd(-5) is None
     assert sync_catalog.parse_cents_to_usd(None) is None
 
+    # Out-of-stock 0-cent Mana Pool entries must never contaminate NM columns with $0.00
+    assert (
+        sync_catalog.extract_manapool_single(
+            {
+                "scryfall_id": "f6555d1f-d4cf-41f7-99d3-88fd53e75457",
+                "price_cents_nm": 0,
+                "price_cents_nm_foil": 0,
+                "price_cents_nm_etched": 0,
+            }
+        )
+        is None
+    )
+
     # Card Kingdom store credit is Cash * 1.30 quantized HALF_UP and guarded for NUMERIC(10, 2)
     assert sync_catalog.compute_ck_credit(Decimal("11.50")) == Decimal("14.95")
     assert sync_catalog.compute_ck_credit(Decimal("0.35")) == Decimal("0.46")

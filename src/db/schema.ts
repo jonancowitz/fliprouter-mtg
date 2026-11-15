@@ -264,7 +264,7 @@ export const lotItems = pgTable(
     isAltered: boolean("is_altered").notNull().default(false),
     isMisprint: boolean("is_misprint").notNull().default(false),
 
-    // Proportional FMV Unit Cost Basis (IRS Schedule C COGS)
+    // Proportional FMV Line-Item Cost Basis (IRS Schedule C COGS; sums to collection_lots.purchase_cost_usd)
     allocatedCostBasisUsd: usdNumeric("allocated_cost_basis_usd"),
 
     // Computed Channel Net Payouts (Per Single Copy)

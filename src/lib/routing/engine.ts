@@ -9,7 +9,7 @@ import type {
 import {
   addRational,
   allocateScheduleCCostBasis,
-  coalesceUsdToCents,
+  coalescePositiveUsdToCents,
   divRoundHalfUp,
   formatBasisPointsToPercent,
   formatCentsToUsd,
@@ -72,6 +72,7 @@ const NON_NM_FOIL_BUYLIST_WEAR_NUM = 90n;
 const NON_NM_FOIL_BUYLIST_WEAR_DEN = 100n;
 
 const PAID_SKU_API_NM_THRESHOLD_CENTS = 800n; // $8.00
+const PAID_SKU_API_NON_NM_MIN_NM_CENTS = 100n; // $1.00 (skip sub-dollar bulk on LP/MP/HP)
 const BUYLIST_MIN_ELIGIBLE_CENTS = 50n; // $0.50
 const BULK_SINGLE_NET_FLOOR_CENTS = 75n; // $0.75
 const BINDER_LOCAL_RETAIL_MIN_CENTS = 50n; // $0.50
@@ -191,19 +192,19 @@ export function resolveNmRetailBaselineCents(
 ): bigint {
   let resolved: bigint | null = null;
   if (finish === "normal") {
-    resolved = coalesceUsdToCents(
+    resolved = coalescePositiveUsdToCents(
       card.tcgMarketNm,
       card.tcgLowNm,
       card.manapoolLowNm,
     );
   } else if (finish === "foil") {
-    resolved = coalesceUsdToCents(
+    resolved = coalescePositiveUsdToCents(
       card.tcgMarketFoil,
       card.tcgLowFoil,
       card.manapoolLowFoil,
     );
   } else {
-    resolved = coalesceUsdToCents(
+    resolved = coalescePositiveUsdToCents(
       card.tcgMarketEtched,
       card.tcgLowEtched,
       card.manapoolLowEtched,
@@ -215,17 +216,23 @@ export function resolveNmRetailBaselineCents(
 }
 
 /**
- * Determines Pro-tier paid SKU API eligibility (`TCGAPIs` / `JustTCG`):
+ * Determines Pro-tier paid SKU API eligibility (`TCGAPIs` / `JustTCG`, `SPEC.md` §2.3):
  * - Skips when a fresh 24h `sku_price_cache` entry already exists.
- * - Skips when `monthly_sku_api_used >= monthly_sku_api_quota` (or Starter quota `0`).
- * - Skips buylist-quarantined items (including `condition === 'DMG'`).
- * - Requires `condition !== 'NM'` AND finish-specific NM baseline `>= $8.00`
- *   (unless `options.includeHighValueNm` is explicitly enabled).
+ * - Skips buylist-quarantined items (`DMG`, non-`'en'`, `is_altered`, `is_misprint`).
+ * - Skips when `monthly_sku_api_used >= monthly_sku_api_quota` (accounting for
+ *   automatic monthly rollover when `sku_api_quota_reset_at <= now`, or Starter quota `0`).
+ * - Eligible when finish-specific NM baseline `>= $8.00` (including `NM`, unless
+ *   `options.includeHighValueNm === false`) OR when `condition` is `LP`/`MP`/`HP`
+ *   with finish-specific NM baseline `>= $1.00` (skipping sub-dollar bulk).
  */
 export function evaluatePaidSkuApiEligibility(
   input: RoutingCardInput,
   profileInput?: Partial<RoutingProfileConfig>,
-  options: { now?: Date; includeHighValueNm?: boolean } = {},
+  options: {
+    now?: Date;
+    includeHighValueNm?: boolean;
+    minNonNmBaselineCents?: bigint;
+  } = {},
 ): PaidSkuApiEligibility {
   const profile = resolveRoutingProfile(profileInput);
   const finish = input.finish ?? "normal";
@@ -265,9 +272,14 @@ export function evaluatePaidSkuApiEligibility(
     };
   }
 
+  const quotaResetElapsed =
+    profile.skuApiQuotaResetAt !== undefined &&
+    profile.skuApiQuotaResetAt.getTime() <= now.getTime();
+  const effectiveQuotaUsed = quotaResetElapsed ? 0 : profile.monthlySkuApiUsed;
+
   if (
     profile.monthlySkuApiQuota <= 0 ||
-    profile.monthlySkuApiUsed >= profile.monthlySkuApiQuota
+    effectiveQuotaUsed >= profile.monthlySkuApiQuota
   ) {
     return {
       eligible: false,
@@ -277,16 +289,33 @@ export function evaluatePaidSkuApiEligibility(
     };
   }
 
-  if (condition === "NM" && !options.includeHighValueNm) {
+  if (condition === "NM") {
+    if (options.includeHighValueNm === false) {
+      return {
+        eligible: false,
+        nmBaselineCents,
+        nmBaselineUsd,
+        skipReason: "near_mint_condition",
+      };
+    }
+    if (nmBaselineCents < PAID_SKU_API_NM_THRESHOLD_CENTS) {
+      return {
+        eligible: false,
+        nmBaselineCents,
+        nmBaselineUsd,
+        skipReason: "below_nm_price_threshold",
+      };
+    }
     return {
-      eligible: false,
+      eligible: true,
       nmBaselineCents,
       nmBaselineUsd,
-      skipReason: "near_mint_condition",
     };
   }
 
-  if (nmBaselineCents < PAID_SKU_API_NM_THRESHOLD_CENTS) {
+  const minNonNmBaselineCents =
+    options.minNonNmBaselineCents ?? PAID_SKU_API_NON_NM_MIN_NM_CENTS;
+  if (nmBaselineCents < minNonNmBaselineCents) {
     return {
       eligible: false,
       nmBaselineCents,
@@ -308,10 +337,10 @@ function resolveCatalogNmTcgBaseline(
 ): bigint {
   const cents =
     finish === "normal"
-      ? coalesceUsdToCents(card.tcgMarketNm, card.tcgLowNm)
+      ? coalescePositiveUsdToCents(card.tcgMarketNm, card.tcgLowNm)
       : finish === "foil"
-        ? coalesceUsdToCents(card.tcgMarketFoil, card.tcgLowFoil)
-        : coalesceUsdToCents(
+        ? coalescePositiveUsdToCents(card.tcgMarketFoil, card.tcgLowFoil)
+        : coalescePositiveUsdToCents(
             card.tcgMarketEtched,
             card.tcgLowEtched,
             card.tcgMarketFoil,
@@ -325,14 +354,18 @@ function resolveCatalogNmMpBaseline(
 ): bigint {
   const cents =
     finish === "normal"
-      ? coalesceUsdToCents(card.manapoolLowNm, card.tcgLowNm, card.tcgMarketNm)
+      ? coalescePositiveUsdToCents(
+          card.manapoolLowNm,
+          card.tcgLowNm,
+          card.tcgMarketNm,
+        )
       : finish === "foil"
-        ? coalesceUsdToCents(
+        ? coalescePositiveUsdToCents(
             card.manapoolLowFoil,
             card.tcgLowFoil,
             card.tcgMarketFoil,
           )
-        : coalesceUsdToCents(
+        : coalescePositiveUsdToCents(
             card.manapoolLowEtched,
             card.tcgLowEtched,
             card.tcgMarketEtched,
@@ -348,10 +381,10 @@ function resolveCatalogNmP2pBaseline(
 ): bigint {
   const cents =
     finish === "normal"
-      ? coalesceUsdToCents(card.tcgLowNm, card.tcgMarketNm)
+      ? coalescePositiveUsdToCents(card.tcgLowNm, card.tcgMarketNm)
       : finish === "foil"
-        ? coalesceUsdToCents(card.tcgLowFoil, card.tcgMarketFoil)
-        : coalesceUsdToCents(
+        ? coalescePositiveUsdToCents(card.tcgLowFoil, card.tcgMarketFoil)
+        : coalescePositiveUsdToCents(
             card.tcgLowEtched,
             card.tcgMarketEtched,
             card.tcgLowFoil,
@@ -384,7 +417,7 @@ function resolveCatalogNmCkBuylistCredit(
       : finish === "foil"
         ? parseUsdToCents(card.ckBuylistCreditFoil)
         : parseUsdToCents(card.ckBuylistCreditEtched);
-  return cents !== null && cents > 0n ? cents : null;
+  return cents !== null && cents >= 0n ? cents : null;
 }
 
 /**
@@ -428,10 +461,16 @@ export function resolveChannelBaselines(
   );
 
   const cachedTcgCents = freshCache
-    ? coalesceUsdToCents(freshCache.retailMarketUsd, freshCache.retailLowUsd)
+    ? coalescePositiveUsdToCents(
+        freshCache.retailMarketUsd,
+        freshCache.retailLowUsd,
+      )
     : null;
   const cachedLowFirstCents = freshCache
-    ? coalesceUsdToCents(freshCache.retailLowUsd, freshCache.retailMarketUsd)
+    ? coalescePositiveUsdToCents(
+        freshCache.retailLowUsd,
+        freshCache.retailMarketUsd,
+      )
     : null;
 
   const pRetailTcgCents =
@@ -574,8 +613,11 @@ function computeCreditArbNetCents(
   const hasExplicitCacheCredit =
     baselines.usedFreshSkuCache &&
     parseUsdToCents(input.skuPriceCache?.buylistCreditUsd) !== null;
+  const hasExplicitCacheCash =
+    baselines.usedFreshSkuCache &&
+    parseUsdToCents(input.skuPriceCache?.buylistCashUsd) !== null;
   const hasExplicitCustomCatalogCredit =
-    !baselines.usedFreshSkuCache &&
+    !hasExplicitCacheCash &&
     nmCkCredit !== null &&
     nmCkCredit !== expectedDefaultNmCredit;
 
@@ -622,6 +664,18 @@ export function computeChannelNets(
     "trackedThresholdUsd",
   );
 
+  if (hourlyRateCents < 0n) {
+    throw new RangeError("hourlyLaborRateUsd cannot be negative.");
+  }
+  if (pweShippingCents < 0n) {
+    throw new RangeError("pweShippingCostUsd cannot be negative.");
+  }
+  if (trackedShippingCents < 0n) {
+    throw new RangeError("trackedShippingCostUsd cannot be negative.");
+  }
+  if (trackedThresholdCents < 0n) {
+    throw new RangeError("trackedThresholdUsd cannot be negative.");
+  }
   if (profile.secondsPerSingleOrder < 0) {
     throw new RangeError("secondsPerSingleOrder cannot be negative.");
   }
@@ -822,6 +876,122 @@ function selectBulkSubchannel(
     : "bulk_wholesale";
 }
 
+interface BuylistChannelFilter {
+  readonly allowCkCash: boolean;
+  readonly allowCkCredit: boolean;
+  readonly allowConduit: boolean;
+}
+
+interface BucketDecisionChoice {
+  readonly assignedBucket: AssignedBucket;
+  readonly recommendedChannel: RecommendedChannel;
+  readonly optimalUnitNetCents: bigint;
+}
+
+function decideBucketForEvaluatedCard(
+  baselines: ResolvedChannelBaselines,
+  nets: ComputedChannelNets,
+  minSingleGainOverBuylistCents: bigint,
+  nonBuylistFallbackBucket: "PILE_2_SINGLES" | "PILE_4_BULK",
+  nonBuylistFallbackChannel: RecommendedChannel,
+  nonBuylistFallbackUnitNetCents: bigint,
+  filter: BuylistChannelFilter,
+): BucketDecisionChoice {
+  const bulkChannel = selectBulkSubchannel(baselines);
+
+  let effectivePBuyCashCents = 0n;
+  let effectiveNetBuylistCashCents = 0n;
+  let effectiveBuylistCashChannel:
+    | "ck_cash"
+    | "conduit_sorted"
+    | "conduit_curated"
+    | "conduit_standard" = "ck_cash";
+
+  if (!baselines.isQuarantined) {
+    if (filter.allowCkCash && filter.allowConduit) {
+      effectivePBuyCashCents = maxCents(
+        baselines.pBuyCkCents,
+        baselines.pBuyConduitCents,
+      );
+      if (nets.netConduitActiveTierCents > nets.netCkCashCents) {
+        effectiveBuylistCashChannel = nets.activeConduitChannel;
+        effectiveNetBuylistCashCents = nets.netConduitActiveTierCents;
+      } else {
+        effectiveBuylistCashChannel = "ck_cash";
+        effectiveNetBuylistCashCents = nets.netCkCashCents;
+      }
+    } else if (filter.allowCkCash) {
+      effectivePBuyCashCents = baselines.pBuyCkCents;
+      effectiveBuylistCashChannel = "ck_cash";
+      effectiveNetBuylistCashCents = nets.netCkCashCents;
+    } else if (filter.allowConduit) {
+      effectivePBuyCashCents = baselines.pBuyConduitCents;
+      effectiveBuylistCashChannel = nets.activeConduitChannel;
+      effectiveNetBuylistCashCents = nets.netConduitActiveTierCents;
+    }
+  }
+
+  const maxAvailableBuylistRawCents = maxCents(
+    effectivePBuyCashCents,
+    filter.allowCkCredit && !baselines.isQuarantined
+      ? baselines.pBuyCkCents
+      : 0n,
+  );
+
+  // Step 1: PILE_4_BULK — `(quarantined || P_buy < $0.50) && Net_BestSingle < $0.75`
+  if (
+    (baselines.isQuarantined ||
+      maxAvailableBuylistRawCents < BUYLIST_MIN_ELIGIBLE_CENTS) &&
+    nets.netBestSingleCents < BULK_SINGLE_NET_FLOOR_CENTS
+  ) {
+    return {
+      assignedBucket: "PILE_4_BULK",
+      recommendedChannel: bulkChannel,
+      optimalUnitNetCents: 0n,
+    };
+  }
+
+  // Step 2: PILE_3_CREDIT_ARB — buylist-eligible (`P_buy_CK >= $0.50`), credit arb enabled,
+  // `Net_Credit_Arb > Net_Buylist_Cash`, AND `(Net_BestSingle - Net_Credit_Arb) < tau`
+  if (
+    !baselines.isQuarantined &&
+    filter.allowCkCredit &&
+    baselines.pBuyCkCents >= BUYLIST_MIN_ELIGIBLE_CENTS &&
+    nets.netCkCreditCents > effectiveNetBuylistCashCents &&
+    nets.netBestSingleCents - nets.netCkCreditCents <
+      minSingleGainOverBuylistCents
+  ) {
+    return {
+      assignedBucket: "PILE_3_CREDIT_ARB",
+      recommendedChannel: "ck_credit",
+      optimalUnitNetCents: nets.netCkCreditCents,
+    };
+  }
+
+  // Step 3: PILE_1_BUYLIST — buylist-eligible (`P_buy >= $0.50`) AND
+  // `(Net_BestSingle - Net_Buylist_Cash) < tau`
+  if (
+    !baselines.isQuarantined &&
+    (filter.allowCkCash || filter.allowConduit) &&
+    effectivePBuyCashCents >= BUYLIST_MIN_ELIGIBLE_CENTS &&
+    nets.netBestSingleCents - effectiveNetBuylistCashCents <
+      minSingleGainOverBuylistCents
+  ) {
+    return {
+      assignedBucket: "PILE_1_BUYLIST",
+      recommendedChannel: effectiveBuylistCashChannel,
+      optimalUnitNetCents: effectiveNetBuylistCashCents,
+    };
+  }
+
+  // Step 4: PILE_2_SINGLES (with `< $0.75` floor safety fallback to `PILE_4_BULK`)
+  return {
+    assignedBucket: nonBuylistFallbackBucket,
+    recommendedChannel: nonBuylistFallbackChannel,
+    optimalUnitNetCents: nonBuylistFallbackUnitNetCents,
+  };
+}
+
 /**
  * Evaluates a single card line item through the strict 4-bucket decision tree
  * (`SPEC.md` §4.C):
@@ -868,13 +1038,6 @@ export function evaluateCardRouting(
   );
 
   const buylistCashMode = options.buylistCashMode ?? "best";
-  const activePBuyCents =
-    buylistCashMode === "ck_direct"
-      ? baselines.pBuyCkCents
-      : buylistCashMode === "conduit"
-        ? baselines.pBuyConduitCents
-        : maxCents(baselines.pBuyCkCents, baselines.pBuyConduitCents);
-
   const bulkChannel = selectBulkSubchannel(baselines);
   const nonBuylistFallbackBucket: "PILE_2_SINGLES" | "PILE_4_BULK" =
     nets.netBestSingleCents >= BULK_SINGLE_NET_FLOOR_CENTS
@@ -889,55 +1052,19 @@ export function evaluateCardRouting(
       ? nets.netBestSingleCents
       : 0n;
 
-  let assignedBucket: AssignedBucket;
-  let recommendedChannel: RecommendedChannel;
-  let optimalUnitNetCents: bigint;
-
-  // Step 1: PILE_4_BULK — `(quarantined || P_buy < $0.50) && Net_BestSingle < $0.75`
-  if (
-    (baselines.isQuarantined || activePBuyCents < BUYLIST_MIN_ELIGIBLE_CENTS) &&
-    nets.netBestSingleCents < BULK_SINGLE_NET_FLOOR_CENTS
-  ) {
-    assignedBucket = "PILE_4_BULK";
-    recommendedChannel = bulkChannel;
-    optimalUnitNetCents = 0n;
-  }
-  // Step 2: PILE_3_CREDIT_ARB — buylist-eligible (`P_buy_CK >= $0.50`), credit arb enabled,
-  // `Net_Credit_Arb > Net_Buylist_Cash`, AND `(Net_BestSingle - Net_Credit_Arb) < tau`
-  else if (
-    !baselines.isQuarantined &&
-    profile.enableCreditArbitrage &&
-    baselines.pBuyCkCents >= BUYLIST_MIN_ELIGIBLE_CENTS &&
-    nets.netCkCreditCents > nets.netBuylistCashCents &&
-    nets.netBestSingleCents - nets.netCkCreditCents <
-      minSingleGainOverBuylistCents
-  ) {
-    assignedBucket = "PILE_3_CREDIT_ARB";
-    recommendedChannel = "ck_credit";
-    optimalUnitNetCents = nets.netCkCreditCents;
-  }
-  // Step 3: PILE_1_BUYLIST — buylist-eligible (`P_buy >= $0.50`) AND
-  // `(Net_BestSingle - Net_Buylist_Cash) < tau`
-  else if (
-    !baselines.isQuarantined &&
-    activePBuyCents >= BUYLIST_MIN_ELIGIBLE_CENTS &&
-    nets.netBestSingleCents - nets.netBuylistCashCents <
-      minSingleGainOverBuylistCents
-  ) {
-    assignedBucket = "PILE_1_BUYLIST";
-    recommendedChannel = nets.activeBuylistCashChannel;
-    optimalUnitNetCents = nets.netBuylistCashCents;
-  }
-  // Step 4: PILE_2_SINGLES (with `< $0.75` floor safety fallback to `PILE_4_BULK`)
-  else if (nets.netBestSingleCents >= BULK_SINGLE_NET_FLOOR_CENTS) {
-    assignedBucket = "PILE_2_SINGLES";
-    recommendedChannel = nets.bestSingleChannel;
-    optimalUnitNetCents = nets.netBestSingleCents;
-  } else {
-    assignedBucket = "PILE_4_BULK";
-    recommendedChannel = bulkChannel;
-    optimalUnitNetCents = 0n;
-  }
+  const choice = decideBucketForEvaluatedCard(
+    baselines,
+    nets,
+    minSingleGainOverBuylistCents,
+    nonBuylistFallbackBucket,
+    nonBuylistFallbackChannel,
+    nonBuylistFallbackUnitNetCents,
+    {
+      allowCkCash: buylistCashMode !== "conduit",
+      allowCkCredit: profile.enableCreditArbitrage,
+      allowConduit: buylistCashMode !== "ck_direct",
+    },
+  );
 
   return {
     scryfallId: input.card.scryfallId,
@@ -949,10 +1076,10 @@ export function evaluateCardRouting(
     isMisprint,
     baselines,
     nets,
-    assignedBucket,
-    recommendedChannel,
-    optimalUnitNetCents,
-    optimalUnitNetUsd: formatCentsToUsd(optimalUnitNetCents),
+    assignedBucket: choice.assignedBucket,
+    recommendedChannel: choice.recommendedChannel,
+    optimalUnitNetCents: choice.optimalUnitNetCents,
+    optimalUnitNetUsd: formatCentsToUsd(choice.optimalUnitNetCents),
     nonBuylistFallbackBucket,
     nonBuylistFallbackChannel,
     nonBuylistFallbackUnitNetCents,
@@ -1022,6 +1149,15 @@ export function routeCollectionLot(
     evaluateCardRouting(item, profile, options),
   );
 
+  const minSingleGainOverBuylistCents = parseRequiredUsdToCents(
+    profile.minSingleNetGainOverBuylistUsd,
+    "minSingleNetGainOverBuylistUsd",
+  );
+  const buylistCashMode = options.buylistCashMode ?? "best";
+  const baseAllowCkCash = buylistCashMode !== "conduit";
+  const baseAllowCkCredit = profile.enableCreditArbitrage;
+  const baseAllowConduit = buylistCashMode !== "ck_direct";
+
   const costBasisAllocations = allocateScheduleCCostBasis(
     purchaseCostCents,
     evaluatedItems.map((ev) => ({
@@ -1030,8 +1166,8 @@ export function routeCollectionLot(
     })),
   );
 
-  // Group initial buylist assignments by outbound vendor (`card_kingdom` vs `card_conduit`)
-  const vendorItemIndices = new Map<BuylistVendor, number[]>();
+  // Group initial unconstrained buylist assignments by outbound vendor (`card_kingdom` vs `card_conduit`)
+  const initialVendorItemIndices = new Map<BuylistVendor, number[]>();
   for (let idx = 0; idx < evaluatedItems.length; idx += 1) {
     const ev = evaluatedItems[idx]!;
     const vendor = getBuylistShipmentVendor(
@@ -1039,56 +1175,113 @@ export function routeCollectionLot(
       ev.recommendedChannel,
     );
     if (vendor !== null) {
-      const existing = vendorItemIndices.get(vendor) ?? [];
+      const existing = initialVendorItemIndices.get(vendor) ?? [];
       existing.push(idx);
-      vendorItemIndices.set(vendor, existing);
+      initialVendorItemIndices.set(vendor, existing);
     }
   }
 
-  const demotedIndices = new Set<number>();
+  // Evaluate compatible active vendor subsets ordered from fewest outbound boxes
+  // to most boxes (`0 -> 1 -> 2`), cascading items from any unviable vendor box
+  // into the surviving buylist vendor (when eligible) or non-buylist fallbacks
+  // (`PILE_2_SINGLES` / `PILE_4_BULK`) and picking the strict net-payout winner.
+  const candidateVendorSubsets: ReadonlyArray<ReadonlySet<BuylistVendor>> = [
+    new Set<BuylistVendor>(),
+    new Set<BuylistVendor>(["card_kingdom"]),
+    new Set<BuylistVendor>(["card_conduit"]),
+    new Set<BuylistVendor>(["card_kingdom", "card_conduit"]),
+  ];
+
+  let bestChoices: BucketDecisionChoice[] = [];
+  let bestNetAfterPostageCents: bigint | null = null;
+  let bestUsedVendorCount = 0;
+
+  for (const allowedVendors of candidateVendorSubsets) {
+    const filter: BuylistChannelFilter = {
+      allowCkCash: allowedVendors.has("card_kingdom") && baseAllowCkCash,
+      allowCkCredit: allowedVendors.has("card_kingdom") && baseAllowCkCredit,
+      allowConduit: allowedVendors.has("card_conduit") && baseAllowConduit,
+    };
+
+    const choices: BucketDecisionChoice[] = [];
+    const usedVendors = new Set<BuylistVendor>();
+    let candidateSubtotalCents = 0n;
+
+    for (let idx = 0; idx < evaluatedItems.length; idx += 1) {
+      const ev = evaluatedItems[idx]!;
+      const choice = decideBucketForEvaluatedCard(
+        ev.baselines,
+        ev.nets,
+        minSingleGainOverBuylistCents,
+        ev.nonBuylistFallbackBucket,
+        ev.nonBuylistFallbackChannel,
+        ev.nonBuylistFallbackUnitNetCents,
+        filter,
+      );
+      choices.push(choice);
+      candidateSubtotalCents += BigInt(ev.quantity) * choice.optimalUnitNetCents;
+      const vendor = getBuylistShipmentVendor(
+        choice.assignedBucket,
+        choice.recommendedChannel,
+      );
+      if (vendor !== null) {
+        usedVendors.add(vendor);
+      }
+    }
+
+    const candidateBoxShippingCents =
+      BigInt(usedVendors.size) * boxShippingPerVendorCents;
+    const candidateNetAfterPostageCents =
+      candidateSubtotalCents - candidateBoxShippingCents;
+
+    if (
+      bestNetAfterPostageCents === null ||
+      candidateNetAfterPostageCents > bestNetAfterPostageCents ||
+      (candidateNetAfterPostageCents === bestNetAfterPostageCents &&
+        usedVendors.size < bestUsedVendorCount)
+    ) {
+      bestNetAfterPostageCents = candidateNetAfterPostageCents;
+      bestChoices = choices;
+      bestUsedVendorCount = usedVendors.size;
+    }
+  }
+
+  const finalVendorItemIndices = new Map<BuylistVendor, number[]>();
+  for (let idx = 0; idx < evaluatedItems.length; idx += 1) {
+    const choice = bestChoices[idx]!;
+    const vendor = getBuylistShipmentVendor(
+      choice.assignedBucket,
+      choice.recommendedChannel,
+    );
+    if (vendor !== null) {
+      const existing = finalVendorItemIndices.get(vendor) ?? [];
+      existing.push(idx);
+      finalVendorItemIndices.set(vendor, existing);
+    }
+  }
+
   const vendorShipments: VendorBuylistShipmentSummary[] = [];
   let outboundBoxCount = 0;
   let outboundBoxShippingCents = 0n;
 
   for (const vendor of ["card_kingdom", "card_conduit"] as const) {
-    const indices = vendorItemIndices.get(vendor);
-    if (!indices || indices.length === 0) {
-      continue;
-    }
+    const finalIndices = finalVendorItemIndices.get(vendor);
+    const initialIndices = initialVendorItemIndices.get(vendor);
 
-    let totalVendorCards = 0;
-    let grossBuylistNetCents = 0n;
-    let fallbackNetCents = 0n;
+    if (finalIndices && finalIndices.length > 0) {
+      let totalVendorCards = 0;
+      let grossBuylistNetCents = 0n;
+      let fallbackNetCents = 0n;
 
-    for (const idx of indices) {
-      const ev = evaluatedItems[idx]!;
-      const qty = BigInt(ev.quantity);
-      totalVendorCards += ev.quantity;
-      grossBuylistNetCents += qty * ev.optimalUnitNetCents;
-      fallbackNetCents += qty * ev.nonBuylistFallbackUnitNetCents;
-    }
-
-    // SPEC.md §4.D: if `grossBuylistNet - boxShipping <= fallbackNet`, re-route
-    // out of buylist so tiny buylist boxes never lose money to postage.
-    const shouldDemote =
-      grossBuylistNetCents - boxShippingPerVendorCents <= fallbackNetCents;
-
-    if (shouldDemote) {
-      for (const idx of indices) {
-        demotedIndices.add(idx);
+      for (const idx of finalIndices) {
+        const ev = evaluatedItems[idx]!;
+        const choice = bestChoices[idx]!;
+        const qty = BigInt(ev.quantity);
+        totalVendorCards += ev.quantity;
+        grossBuylistNetCents += qty * choice.optimalUnitNetCents;
+        fallbackNetCents += qty * ev.nonBuylistFallbackUnitNetCents;
       }
-      vendorShipments.push({
-        vendor,
-        totalCards: totalVendorCards,
-        grossBuylistNetCents,
-        grossBuylistNetUsd: formatCentsToUsd(grossBuylistNetCents),
-        fallbackNetCents,
-        fallbackNetUsd: formatCentsToUsd(fallbackNetCents),
-        boxShippingCents: 0n,
-        boxShippingUsd: "0.00",
-        demotedToNonBuylist: true,
-      });
-    } else {
+
       outboundBoxCount += 1;
       outboundBoxShippingCents += boxShippingPerVendorCents;
       vendorShipments.push({
@@ -1101,6 +1294,30 @@ export function routeCollectionLot(
         boxShippingCents: boxShippingPerVendorCents,
         boxShippingUsd: formatCentsToUsd(boxShippingPerVendorCents),
         demotedToNonBuylist: false,
+      });
+    } else if (initialIndices && initialIndices.length > 0) {
+      let totalVendorCards = 0;
+      let grossBuylistNetCents = 0n;
+      let fallbackNetCents = 0n;
+
+      for (const idx of initialIndices) {
+        const ev = evaluatedItems[idx]!;
+        const qty = BigInt(ev.quantity);
+        totalVendorCards += ev.quantity;
+        grossBuylistNetCents += qty * ev.optimalUnitNetCents;
+        fallbackNetCents += qty * ev.nonBuylistFallbackUnitNetCents;
+      }
+
+      vendorShipments.push({
+        vendor,
+        totalCards: totalVendorCards,
+        grossBuylistNetCents,
+        grossBuylistNetUsd: formatCentsToUsd(grossBuylistNetCents),
+        fallbackNetCents,
+        fallbackNetUsd: formatCentsToUsd(fallbackNetCents),
+        boxShippingCents: 0n,
+        boxShippingUsd: "0.00",
+        demotedToNonBuylist: true,
       });
     }
   }
@@ -1148,21 +1365,20 @@ export function routeCollectionLot(
   const routedItems: RoutedLotItem[] = evaluatedItems.map((ev, idx) => {
     const sourceInput = lotInput.items[idx]!;
     const costAlloc = costBasisAllocations[idx]!;
-    const demoted = demotedIndices.has(idx);
+    const finalChoice = bestChoices[idx]!;
 
-    const finalBucket: AssignedBucket = demoted
-      ? ev.nonBuylistFallbackBucket
-      : ev.assignedBucket;
-    const finalChannel: RecommendedChannel = demoted
-      ? ev.nonBuylistFallbackChannel
-      : ev.recommendedChannel;
-    const finalUnitNetCents = demoted
-      ? ev.nonBuylistFallbackUnitNetCents
-      : ev.optimalUnitNetCents;
+    const finalBucket = finalChoice.assignedBucket;
+    const finalChannel = finalChoice.recommendedChannel;
+    const finalUnitNetCents = finalChoice.optimalUnitNetCents;
+    const reassignedByPostageGuard =
+      finalBucket !== ev.assignedBucket ||
+      finalChannel !== ev.recommendedChannel;
 
     const qtyBig = BigInt(ev.quantity);
     const totalOptimalNetCents = qtyBig * finalUnitNetCents;
     const rowGrossFmvCents = qtyBig * ev.baselines.initialFmvCents;
+    const rowCostBasisUsd = formatCentsToUsd(costAlloc.totalCostBasisCents);
+    const unitCostBasisUsd = formatCentsToUsd(costAlloc.unitCostBasisCents);
 
     totalCards += ev.quantity;
     estimatedGrossValueCents += rowGrossFmvCents;
@@ -1182,15 +1398,15 @@ export function routeCollectionLot(
       recommendedChannel: finalChannel,
       optimalUnitNetCents: finalUnitNetCents,
       optimalUnitNetUsd: formatCentsToUsd(finalUnitNetCents),
-      allocatedCostBasisCents: costAlloc.unitCostBasisCents,
-      allocatedCostBasisUsd: formatCentsToUsd(costAlloc.unitCostBasisCents),
+      allocatedCostBasisCents: costAlloc.totalCostBasisCents,
+      allocatedCostBasisUsd: rowCostBasisUsd,
+      unitAllocatedCostBasisCents: costAlloc.unitCostBasisCents,
+      unitAllocatedCostBasisUsd: unitCostBasisUsd,
       totalAllocatedCostBasisCents: costAlloc.totalCostBasisCents,
-      totalAllocatedCostBasisUsd: formatCentsToUsd(
-        costAlloc.totalCostBasisCents,
-      ),
+      totalAllocatedCostBasisUsd: rowCostBasisUsd,
       totalOptimalNetCents,
       totalOptimalNetUsd: formatCentsToUsd(totalOptimalNetCents),
-      demotedFromBuylistByPostageGuard: demoted,
+      demotedFromBuylistByPostageGuard: reassignedByPostageGuard,
       initialAssignedBucket: ev.assignedBucket,
       initialRecommendedChannel: ev.recommendedChannel,
     };

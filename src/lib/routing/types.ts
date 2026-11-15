@@ -226,8 +226,13 @@ export type BuylistVendor = "card_kingdom" | "card_conduit";
 
 export interface RoutedLotItem extends EvaluatedCardRouting {
   card: CatalogPriceFields;
+  /** Line-item Schedule C allocated cost basis (`lot_items.allocated_cost_basis_usd`), summing cent-exact to `purchaseCostUsd`. */
   allocatedCostBasisCents: bigint;
   allocatedCostBasisUsd: string;
+  /** Per-copy unit cost basis (`roundHalfUp(allocatedCostBasisCents / quantity)`). */
+  unitAllocatedCostBasisCents: bigint;
+  unitAllocatedCostBasisUsd: string;
+  /** Alias for `allocatedCostBasisCents` / `allocatedCostBasisUsd` (line-item total cost basis). */
   totalAllocatedCostBasisCents: bigint;
   totalAllocatedCostBasisUsd: string;
   totalOptimalNetCents: bigint;

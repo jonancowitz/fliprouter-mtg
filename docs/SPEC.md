@@ -131,7 +131,7 @@ CREATE TABLE lot_items (
     is_altered BOOLEAN NOT NULL DEFAULT FALSE,
     is_misprint BOOLEAN NOT NULL DEFAULT FALSE,
     
-    -- Proportional FMV Unit Cost Basis (IRS Schedule C COGS)
+    -- Proportional FMV Line-Item Cost Basis (IRS Schedule C COGS; sums to collection_lots.purchase_cost_usd)
     allocated_cost_basis_usd NUMERIC(10, 2),
     
     -- Computed Channel Net Payouts (Per Single Copy)
@@ -233,11 +233,11 @@ Let $\text{Net}_{\text{BestSingle}} = \max(\text{Net}_{\text{TCG}}, \text{Net}_{
 
 ### D. Lot-Level Outbound Buylist Box Shipping & Schedule C Cost Basis
 * **Lot-Level Buylist Box Postage Guardrail (`outbound_buylist_box_shipping_usd`, default `$12.00`):**
-  * After item-level bucket assignment, deduct `outbound_buylist_box_shipping_usd` once per distinct outbound wholesale buylist box (combined into one `$12.00` box when `PILE_1_BUYLIST` (`ck_cash`) and `PILE_3_CREDIT_ARB` (`ck_credit`) both ship to Card Kingdom, or one `$12.00` box per vendor when `PILE_1_BUYLIST` ships to Card Conduit and `PILE_3_CREDIT_ARB` ships to Card Kingdom). If the aggregate net payout of a vendor's buylist shipment minus `outbound_buylist_box_shipping_usd` is less than or equal to routing those same items to their next-best non-buylist fallback (`PILE_2_SINGLES` if $\text{Net}_{\text{BestSingle}} \ge \$0.75$, else `PILE_4_BULK`), automatically re-route those items out of buylist so tiny buylist boxes are never recommended when postage exceeds margin.
+  * After item-level bucket assignment, deduct `outbound_buylist_box_shipping_usd` once per distinct outbound wholesale buylist box (combined into one `$12.00` box when `PILE_1_BUYLIST` (`ck_cash`) and `PILE_3_CREDIT_ARB` (`ck_credit`) both ship to Card Kingdom, or one `$12.00` box per vendor when `PILE_1_BUYLIST` ships to Card Conduit and `PILE_3_CREDIT_ARB` ships to Card Kingdom). Evaluate compatible active vendor-box subsets (`Card Kingdom`, `Card Conduit`, both, or neither) through the §4.C decision tree so any vendor buylist box whose incremental payout does not strictly exceed `outbound_buylist_box_shipping_usd` automatically cascades its eligible items into the surviving buylist vendor box (when profitable) or re-routes them to their non-buylist fallback (`PILE_2_SINGLES` if $\text{Net}_{\text{BestSingle}} \ge \$0.75$, else `PILE_4_BULK`), preferring fewer outbound boxes on exact ties.
 * **IRS Schedule C Proportional FMV Cost Basis (`allocated_cost_basis_usd`):**
-  * Given lot acquisition cost $C_{\text{lot}} = \text{purchase\_cost\_usd}$ and each item's initial condition-adjusted retail Fair Market Value $V_i$ with quantity $q_i$ (letting $V_{\text{total}} = \sum_j q_j V_j$):
-    $$\text{allocated\_cost\_basis\_usd}_i = \begin{cases} C_{\text{lot}} \times \dfrac{V_i}{V_{\text{total}}} & \text{if } V_{\text{total}} > 0 \\ 0.00 & \text{otherwise} \end{cases}$$
-    computed in exact integer cents / `Decimal(0.01)` so per-item COGS can be reported cleanly as cards sell across tax periods, alongside lot-level `status` (`draft | routed | shipped | settled`) and `actual_realized_payout_usd`.
+  * Given lot acquisition cost $C_{\text{lot}} = \text{purchase\_cost\_usd}$ and each line item's initial condition-adjusted unit retail Fair Market Value $V_i$ with quantity $q_i$ (letting $V_{\text{total}} = \sum_j q_j V_j$), `lot_items.allocated_cost_basis_usd` stores the **line-item** allocated cost basis:
+    $$\text{allocated\_cost\_basis\_usd}_i = \begin{cases} C_{\text{lot}} \times \dfrac{q_i V_i}{V_{\text{total}}} & \text{if } V_{\text{total}} > 0 \\ 0.00 & \text{otherwise} \end{cases}$$
+    reconciled in exact integer cents via Largest-Remainder (Hamilton) allocation so $\sum_i \text{allocated\_cost\_basis\_usd}_i = \text{purchase\_cost\_usd}$ across every `quantity >= 1` lot whenever $V_{\text{total}} > 0$ (exposing per-copy $\text{round}(\text{allocated\_cost\_basis\_usd}_i / q_i)$ for unit display and splitting partial-row sales across tax periods as $\text{round}(\text{allocated\_cost\_basis\_usd}_i \times q_{\text{sold}} / q_i)$ with the exact cent remainder retained on the unsold copies), alongside lot-level `status` (`draft | routed | shipped | settled`) and `actual_realized_payout_usd`.
 
 ---
 
@@ -251,6 +251,7 @@ Auto-detect scanner format by CSV headers and normalize to `{ scryfallId, tcgpla
 * **Dragon Shield:** Headers `Folder Name, Quantity, Trade Quantity, Card Name, Set Code, Set Name, Card Number, Condition, Printing, Language, Price Bought, Date Bought, LOW, MID, MARKET`. Normalize Dragon Shield set-code/collector-number quirks (lowercase `Set Code`, strip promo `p` prefix fallback if direct set match misses, trim collector number whitespace), resolve via `(LOWER(set_code), collector_number)` against `card_catalog`, map `Printing` (`Normal` $\rightarrow$ `normal`, `Foil` $\rightarrow$ `foil`, `Etched`/`Foil Etched` $\rightarrow$ `etched`), map `Condition` (`Mint`/`NearMint` $\rightarrow$ `NM`, `LightlyPlayed`/`Excellent` $\rightarrow$ `LP`, `ModeratelyPlayed`/`Played` $\rightarrow$ `MP`, `HeavilyPlayed`/`Poor` $\rightarrow$ `HP`, `Damaged` $\rightarrow$ `DMG`), and normalize `Language` to ISO code (`English` $\rightarrow$ `en`).
 
 ### Output Manifests
+All CSV manifest serializers escape embedded commas, double quotes (`""`), and newlines per RFC-4180 and neutralize spreadsheet formula-injection prefixes (`=`, `+`, `-`, `@`, `\t`, `\r`, or leading spaces before `=+-@`, excluding plain negative decimals) by prepending `'` inside double quotes (`"'..."`).
 1. **Card Conduit CSV Export (`PILE_1_BUYLIST`):**
    * Columns: `Quantity, Name, Set Code, Collector Number, Finish, Condition, Scryfall ID`.
    * **Curated Service Validation:** Validate that $\ge 90\%$ of total quantity in the file has $P_{\text{buy}} \ge \$0.50$.

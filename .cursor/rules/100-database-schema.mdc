@@ -13,5 +13,5 @@ alwaysApply: false
   2. `sku_price_cache` (composite PK `(scryfall_id, finish, condition)` with 24h `expires_at` TTL for paid condition SKU API responses).
   3. `user_routing_profiles` (includes `outbound_buylist_box_shipping_usd` default `12.00` and monthly SKU API quota columns `monthly_sku_api_quota`, `monthly_sku_api_used`, `sku_api_quota_reset_at`).
   4. `collection_lots` (includes `status` `'draft' | 'routed' | 'shipped' | 'settled'` and `actual_realized_payout_usd` for Schedule C tracking).
-  5. `lot_items` (includes `language` default `'en'`, `is_altered`, `is_misprint`, and proportional FMV `allocated_cost_basis_usd`).
+  5. `lot_items` (includes `language` default `'en'`, `is_altered`, `is_misprint`, and line-item proportional FMV `allocated_cost_basis_usd` summing cent-exact to `collection_lots.purchase_cost_usd`).
 - Always maintain composite index `idx_card_lookup ON card_catalog (LOWER(set_code), collector_number)`, `idx_tcgplayer_id ON card_catalog (tcgplayer_id)`, `idx_tcgplayer_etched_id ON card_catalog (tcgplayer_etched_id)`, and `idx_sku_price_cache_expires_at ON sku_price_cache (expires_at)`.

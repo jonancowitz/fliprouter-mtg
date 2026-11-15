@@ -5,6 +5,7 @@ import {
   CARD_KINGDOM_BUYLIST_TITLE_HEADERS,
   CardConduitValidationError,
   type ExportableLotItem,
+  escapeCsvCell,
   exportCardConduitCsv,
   exportCardKingdomBuylistCsv,
   exportManapoolStagedCsv,
@@ -13,6 +14,7 @@ import {
   generateAllLotExports,
   MANAPOOL_STAGED_HEADERS,
   TCGPLAYER_STAGED_HEADERS,
+  validateCardConduitShipment,
 } from "@/lib/csv/exports";
 import { parseCsvMatrix } from "@/lib/csv/parser";
 import { routeCollectionLot } from "@/lib/routing/engine";
@@ -131,6 +133,52 @@ describe("Card Conduit CSV Exporter & Validation Gates", () => {
     expect(() =>
       exportCardConduitCsv(boundaryCurated, { tier: "sorted" }),
     ).toThrow(CardConduitValidationError);
+
+    // Explicit $0.00 Conduit quote MUST NOT fall back to CK's $0.80 quote, and Standard tier allows <$0.50 cards
+    const explicitZeroConduit: ExportableLotItem = {
+      ...makeConduitStubItem({
+        name: "CK Only Buy",
+        scryfallId: "00000000-0000-4000-8000-000000000099",
+        quantity: 10,
+        pBuyCents: 0n,
+      }),
+      baselines: {
+        pRetailTcgUsd: "5.00",
+        pRetailMpUsd: "4.80",
+        pRetailP2pUsd: "4.60",
+        pSaleP2pClaimUsd: "3.91",
+        pBuyCkCents: 80n,
+        pBuyConduitCents: 0n,
+      },
+    };
+    expect(() =>
+      exportCardConduitCsv([explicitZeroConduit], { tier: "sorted" }),
+    ).toThrow(CardConduitValidationError);
+    expect(
+      exportCardConduitCsv([explicitZeroConduit], { tier: "standard" })
+        .validation.valid,
+    ).toBe(true);
+
+    // High-denominator boundary diagnostic never displays "90.00%" or "100.00%" when failing
+    const nearCuratedBoundary = validateCardConduitShipment(
+      [
+        makeConduitStubItem({
+          name: "Eligible",
+          scryfallId: "00000000-0000-4000-8000-000000000011",
+          quantity: 17999,
+          pBuyCents: 100n,
+        }),
+        makeConduitStubItem({
+          name: "Bulk",
+          scryfallId: "00000000-0000-4000-8000-000000000012",
+          quantity: 2001,
+          pBuyCents: 20n,
+        }),
+      ],
+      "curated",
+    );
+    expect(nearCuratedBoundary.valid).toBe(false);
+    expect(nearCuratedBoundary.eligiblePercentage).toBe("89.99");
   });
 
   it("sorts Sorted exports descending by P_buy and splits >500 total cards into numbered batches", () => {
@@ -341,6 +389,53 @@ describe("Card Kingdom, TCGplayer, Mana Pool, & Discord/FB Claim Sale Exporters"
     expect(p2pExport.markdown).toContain("### Mid-Tier Staples ($15.00 - $49.99)");
     expect(p2pExport.markdown).toContain(
       "1x Boseiju, Who Endures (NEO #266 - NM/Normal) — TCG Low: $28.00 -> Claim: $23.80",
+    );
+  });
+
+  it("neutralizes OWASP CSV formula-injection vectors while preserving RFC-4180 commas, quotes, and plain decimals", () => {
+    expect(escapeCsvCell("Counterspell")).toBe("Counterspell");
+    expect(escapeCsvCell("Jace, the Mind Sculptor")).toBe(
+      '"Jace, the Mind Sculptor"',
+    );
+    expect(escapeCsvCell('"Ach! Hans, Run!"')).toBe('"""Ach! Hans, Run!"""');
+    expect(escapeCsvCell("30.80")).toBe("30.80");
+    expect(escapeCsvCell("-0.85")).toBe("-0.85");
+
+    // Formula-injection vectors (=, +, -, @, \t, \r, leading-space =+-@)
+    expect(escapeCsvCell("=CMD|' /C calc'!A0")).toBe('"\'=CMD|\' /C calc\'!A0"');
+    expect(escapeCsvCell("+2 Mace")).toBe('"\'+2 Mace"');
+    expect(escapeCsvCell("-2+3")).toBe('"\'-2+3"');
+    expect(escapeCsvCell('@SUM(A1:A2)')).toBe('"\'@SUM(A1:A2)"');
+    expect(escapeCsvCell("\t=1+1")).toBe('"\'\t=1+1"');
+    expect(escapeCsvCell('  =HYPERLINK("http://evil.example")')).toBe(
+      '"\'  =HYPERLINK(""http://evil.example"")"',
+    );
+
+    // End-to-end CSV & Markdown injection safety on a card starting with `+` and embedded newline
+    const maceCard = makeCatalogCard({
+      name: "+2 Mace\n=EVIL()",
+      setCode: "afr",
+      setName: "Adventures in the Forgotten Realms",
+      collectorNumber: "3",
+      tcgMarketNm: "28.00",
+      tcgLowNm: "28.00",
+      manapoolLowNm: "28.00",
+      ckBuylistCashNm: "15.00",
+    });
+    const routed = routeCollectionLot({
+      purchaseCostUsd: "10.00",
+      items: [{ card: maceCard, quantity: 1 }],
+    });
+    const tcgCsv = exportTcgplayerStagedCsv(routed.items, {
+      includeAllSingles: true,
+    });
+    expect(tcgCsv.csv).toContain('"\'+2 Mace\n=EVIL()"');
+    const parsedTcg = parseCsvMatrix(tcgCsv.csv);
+    expect(parsedTcg.records[0]!.values[3]!.startsWith("'+2 Mace")).toBe(true);
+
+    const claimMd = exportP2pClaimMarkdown(routed.items);
+    expect(claimMd.markdown).toContain(
+      "1x +2 Mace =EVIL() (AFR #3 - NM/Normal) — TCG Low: $28.00 -> Claim: $23.80",
     );
   });
 });

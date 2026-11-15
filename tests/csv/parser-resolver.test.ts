@@ -92,15 +92,56 @@ describe("RFC-4180 CSV Matrix & Field Normalizers", () => {
     expect(unknownLong.length).toBeLessThanOrEqual(16);
   });
 
-  it("normalizes finish and condition variants across all 4 scanners", () => {
+  it("normalizes finish and condition variants across all 4 scanners (including non-foil spaces and punctuated/holofoil conditions)", () => {
     expect(normalizeFinish("Foil Etched")).toBe("etched");
     expect(normalizeFinish("Normal", "Lightly Played Foil")).toBe("foil");
     expect(normalizeFinish("Non-Foil")).toBe("normal");
+    expect(normalizeFinish("non foil")).toBe("normal");
+    expect(normalizeFinish("Normal", "Near Mint Non-Foil")).toBe("normal");
     expect(normalizeCondition("Lightly Played Foil")).toBe("LP");
+    expect(normalizeCondition("Lightly Played Holofoil")).toBe("LP");
     expect(normalizeCondition("Excellent")).toBe("LP");
     expect(normalizeCondition("ModeratelyPlayed")).toBe("MP");
+    expect(normalizeCondition("MP+")).toBe("MP");
     expect(normalizeCondition("Poor")).toBe("HP");
+    expect(normalizeCondition("Heavily Played / Foil")).toBe("HP");
     expect(normalizeCondition("Damaged")).toBe("DMG");
+    expect(normalizeCondition("Damaged (Foil)")).toBe("DMG");
+    expect(normalizeCondition("Damaged Reverse Holofoil")).toBe("DMG");
+  });
+
+  it("auto-detects semicolon/tab scanner exports, curly-apostrophe headers, and empty primary column fallbacks", () => {
+    // Semicolon Delver Lens export with curly apostrophe `Collector’s number`
+    const semicolonDelver = [
+      "Name;Edition;Collector\u2019s number;Foil;Qty;Condition",
+      "Lightning Bolt;Double Masters 2022;117;Foil;2;LP",
+    ].join("\n");
+    const parsedDelver = parseScannerCsv(semicolonDelver);
+    expect(parsedDelver.format).toBe("delver_lens");
+    expect(parsedDelver.rows[0]).toMatchObject({
+      cardName: "Lightning Bolt",
+      setName: "Double Masters 2022",
+      collectorNumber: "117",
+      finish: "foil",
+      condition: "LP",
+      quantity: 2,
+    });
+
+    // Tab-delimited minimal ManaBox binder export + TCGplayer empty Simple Name fallback to Name
+    const tabManabox = [
+      "Binder Name\tName\tSet code\tCollector number\tFoil\tQuantity\tScryfall ID\tCondition\tLanguage",
+      "Trade Binder\tSolitude\tmh2\t32\tnon foil\t1\t22222222-3333-4444-8555-666666666666\tnear_mint\tEnglish",
+    ].join("\n");
+    const parsedManabox = parseScannerCsv(tabManabox);
+    expect(parsedManabox.format).toBe("manabox");
+    expect(parsedManabox.rows[0]!.finish).toBe("normal");
+
+    const tcgBlankSimpleName = [
+      "Quantity,Name,Simple Name,Set,Card Number,Set Code,Printing,Condition,Language,Rarity,Product ID,SKU",
+      "1,Lightning Bolt,,Double Masters 2022,117,2X2,Normal,Near Mint,English,Uncommon,697344,5001",
+    ].join("\n");
+    const parsedTcg = parseScannerCsv(tcgBlankSimpleName);
+    expect(parsedTcg.rows[0]!.cardName).toBe("Lightning Bolt");
   });
 });
 
@@ -111,6 +152,8 @@ describe("All 4 Scanner CSV Parsers & Batched PGlite Catalog Resolution", () => 
   const boltId = "7673784e-db4b-43a1-8d55-1bb9fc1e284f";
   const ragavanId = "11111111-2222-4333-8444-555555555555";
   const solitudeId = "22222222-3333-4444-8555-666666666666";
+  const etchedArchiveId = "33333333-4444-4555-8666-777777777777";
+  const foilOnlySecretLairId = "44444444-5555-4666-8777-888888888888";
 
   beforeAll(async () => {
     client = new PGlite();
@@ -165,6 +208,34 @@ describe("All 4 Scanner CSV Parsers & Batched PGlite Catalog Resolution", () => 
         finishes: ["nonfoil", "foil"],
         tcgMarketNm: "14.00",
         ckBuylistCashNm: "8.00",
+      },
+      {
+        scryfallId: etchedArchiveId,
+        oracleId: "cccccccc-dddd-4eee-8fff-000000000000",
+        tcgplayerId: null,
+        tcgplayerEtchedId: 250101,
+        name: "Demonic Tutor",
+        setCode: "sta",
+        setName: "Strixhaven Mystical Archive",
+        collectorNumber: "90e",
+        rarity: "mythic",
+        finishes: ["etched"],
+        tcgMarketEtched: "42.00",
+        ckBuylistCashEtched: "26.00",
+      },
+      {
+        scryfallId: foilOnlySecretLairId,
+        oracleId: "dddddddd-eeee-4fff-8000-111111111111",
+        tcgplayerId: 260202,
+        tcgplayerEtchedId: null,
+        name: "Brainstorm",
+        setCode: "sld",
+        setName: "Secret Lair Drop",
+        collectorNumber: "175a",
+        rarity: "rare",
+        finishes: ["foil"],
+        tcgMarketFoil: "18.00",
+        ckBuylistCashFoil: "11.00",
       },
     ]);
 
@@ -281,13 +352,33 @@ describe("All 4 Scanner CSV Parsers & Batched PGlite Catalog Resolution", () => 
       attemptedStrategies: ["set_collector:zzz#999"],
     });
     expect(resolution.unresolved[0]!.parsedRow.language).toBe("ph");
+
+    // Uppercase variant collector numbers ('90E', '175A') + single/etched-only catalog finish coercion
+    const variantDragonShield = [
+      "Folder Name,Quantity,Card Name,Set Code,Card Number,Condition,Foil,Language,Price Bought",
+      "Archive,1,Demonic Tutor,STA,90E,NearMint,Foil,English,20.00",
+      "SLD Box,1,Brainstorm,SLD,0175A,NearMint,Normal,English,8.00",
+    ].join("\n");
+    const parsedVariants = parseScannerCsv(variantDragonShield);
+    const variantRes = await resolveParsedCsvRows(parsedVariants.rows, db);
+    expect(variantRes.unresolved).toHaveLength(0);
+    expect(variantRes.resolved[0]).toMatchObject({
+      effectiveFinish: "etched",
+      finishListedInCatalog: true,
+      matchedBy: "set_collector_normalized",
+    });
+    expect(variantRes.resolved[1]).toMatchObject({
+      effectiveFinish: "foil",
+      finishListedInCatalog: true,
+      matchedBy: "set_collector_normalized",
+    });
   });
 
-  it("persists routed collection_lots and lot_items rows end-to-end in PGlite with cent-exact COGS", async () => {
+  it("persists routed collection_lots and lot_items rows end-to-end in PGlite with cent-exact SQL SUM(allocated_cost_basis_usd)", async () => {
     const manaboxCsv = [
       "Name,Set code,Set name,Collector number,Foil,Rarity,Quantity,ManaBox ID,Scryfall ID,Purchase price,Misprint,Altered,Condition,Language,Purchase price currency",
-      `"Ragavan, Nimble Pilferer",mh2,Modern Horizons 2,138,foil,mythic,1,1,${ragavanId},25.00,false,false,lightly_played,English,USD`,
-      `Solitude,mh2,Modern Horizons 2,32,normal,mythic,2,2,${solitudeId},8.00,false,false,near_mint,"Chinese (Simplified)",USD`,
+      `"Ragavan, Nimble Pilferer",mh2,Modern Horizons 2,138,foil,mythic,3,1,${ragavanId},25.00,false,false,lightly_played,English,USD`,
+      `Solitude,mh2,Modern Horizons 2,32,normal,mythic,3,2,${solitudeId},8.00,false,false,near_mint,"Chinese (Simplified)",USD`,
     ].join("\n");
 
     const parsed = parseScannerCsv(manaboxCsv);
@@ -324,5 +415,11 @@ describe("All 4 Scanner CSV Parsers & Batched PGlite Catalog Resolution", () => 
     expect(persistedItems).toHaveLength(2);
     expect(persistedItems[1]!.language).toBe("zhs");
     expect(routed.summary.allocatedCostBasisSumUsd).toBe("50.00");
+
+    const sumCheck = await client.query<{ total_cogs: string }>(
+      "SELECT SUM(allocated_cost_basis_usd)::text AS total_cogs FROM lot_items WHERE lot_id = $1",
+      [insertedLot!.lotId],
+    );
+    expect(sumCheck.rows[0]!.total_cogs).toBe("50.00");
   });
 });

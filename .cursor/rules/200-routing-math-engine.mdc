@@ -32,5 +32,5 @@ alwaysApply: false
 4. `PILE_2_SINGLES`: All remaining cards.
 
 ## 4. Lot-Level Box Postage & Schedule C Basis
-- Deduct `outbound_buylist_box_shipping_usd` (default `12.00`) once per distinct outbound vendor buylist shipment (one combined `$12.00` box when `PILE_1_BUYLIST` (`ck_cash`) and `PILE_3_CREDIT_ARB` (`ck_credit`) both ship to Card Kingdom; separate `$12.00` boxes per vendor if shipping to both Card Conduit and Card Kingdom); demote tiny buylist shipments when box postage exceeds margin over singles (`Net_BestSingle >= 0.75`) / bulk fallbacks.
-- Allocate `purchase_cost_usd` proportionally to initial condition-adjusted FMV across `lot_items.allocated_cost_basis_usd`.
+- Deduct `outbound_buylist_box_shipping_usd` (default `12.00`) once per distinct outbound vendor buylist shipment (one combined `$12.00` box when `PILE_1_BUYLIST` (`ck_cash`) and `PILE_3_CREDIT_ARB` (`ck_credit`) both ship to Card Kingdom; separate `$12.00` boxes per vendor if shipping to both Card Conduit and Card Kingdom); evaluate compatible active vendor subsets so unviable vendor boxes cascade eligible items into any surviving buylist vendor box before falling back to singles (`Net_BestSingle >= 0.75`) / bulk (`< 0.75`), preferring fewer boxes on ties.
+- Allocate `purchase_cost_usd` proportionally to initial condition-adjusted line-item FMV (`q_i * V_i / V_total`) via Largest-Remainder integer-cent reconciliation across `lot_items.allocated_cost_basis_usd` so `SUM(lot_items.allocated_cost_basis_usd) === purchase_cost_usd` whenever `V_total > 0`.

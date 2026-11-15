@@ -163,15 +163,49 @@ const LANGUAGE_LOOKUP: Readonly<Record<string, string>> = {
 function normalizeHeaderKey(header: string): string {
   return header
     .replace(/^\uFEFF/, "")
+    .replace(/[\u2018\u2019]/g, "'")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ");
 }
 
+function detectHeaderDelimiter(text: string): string {
+  let inQuotes = false;
+  let commaCount = 0;
+  let tabCount = 0;
+  let semicolonCount = 0;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (ch === '"') {
+      if (inQuotes && text[i + 1] === '"') {
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+    if (!inQuotes) {
+      if (ch === "\r" || ch === "\n") {
+        break;
+      }
+      if (ch === ",") commaCount += 1;
+      else if (ch === "\t") tabCount += 1;
+      else if (ch === ";") semicolonCount += 1;
+    }
+  }
+
+  if (commaCount > 0) return ",";
+  if (tabCount > 0 && tabCount >= semicolonCount) return "\t";
+  if (semicolonCount > 0) return ";";
+  return ",";
+}
+
 /**
- * RFC-4180 compliant CSV matrix parser supporting UTF-8 BOM, optional `sep=`
- * directive lines, quoted fields containing commas/newlines, `""` escaped
- * quotes, CRLF/LF/CR line endings, and blank trailing lines.
+ * RFC-4180 compliant CSV/TXT matrix parser supporting UTF-8 BOM, optional `sep=`
+ * directive lines, auto-detected tab/semicolon scanner exports, quoted fields
+ * containing delimiters/newlines, `""` escaped quotes, CRLF/LF/CR line endings,
+ * and blank trailing lines.
  */
 export function parseCsvMatrix(csvInput: string): ParsedCsvMatrix {
   let text = csvInput.startsWith("\uFEFF") ? csvInput.slice(1) : csvInput;
@@ -186,6 +220,8 @@ export function parseCsvMatrix(csvInput: string): ParsedCsvMatrix {
     delimiter = sepMatch[1];
     text = text.slice(sepMatch[0].length);
     lineOffset = 1;
+  } else {
+    delimiter = detectHeaderDelimiter(text);
   }
 
   const rawRows: RawCsvRecord[] = [];
@@ -297,10 +333,12 @@ export function detectScannerFormat(headers: readonly string[]): ScannerFormat {
   // 1. ManaBox
   if (
     normalized.has("manabox id") ||
+    normalized.has("binder name") ||
     (normalized.has("scryfall id") &&
       normalized.has("set code") &&
       normalized.has("collector number") &&
-      (normalized.has("misprint") ||
+      (normalized.has("foil") ||
+        normalized.has("misprint") ||
         normalized.has("altered") ||
         normalized.has("purchase price currency")))
   ) {
@@ -322,16 +360,21 @@ export function detectScannerFormat(headers: readonly string[]): ScannerFormat {
     (normalized.has("folder name") && normalized.has("card name")) ||
     (normalized.has("trade quantity") &&
       normalized.has("card name") &&
-      normalized.has("printing"))
+      (normalized.has("printing") || normalized.has("foil"))) ||
+    (normalized.has("card name") &&
+      normalized.has("set code") &&
+      normalized.has("card number") &&
+      (normalized.has("price bought") || normalized.has("date bought")))
   ) {
     return "dragon_shield";
   }
 
-  // 4. TCGplayer App
+  // 4. TCGplayer App / TCGplayer Staged CSV
   if (
-    normalized.has("product id") &&
+    (normalized.has("product id") || normalized.has("tcgplayer id")) &&
     (normalized.has("simple name") ||
       normalized.has("sku") ||
+      normalized.has("product line") ||
       (normalized.has("printing") && normalized.has("card number")))
   ) {
     return "tcgplayer_app";
@@ -360,9 +403,9 @@ export function normalizeFinish(
       return "etched";
     }
     if (
-      candidate === "nonfoil" ||
-      candidate === "non-foil" ||
+      /\bnon[\s_-]*foil\b/.test(candidate) ||
       candidate === "normal" ||
+      candidate === "regular" ||
       candidate === "false" ||
       candidate === "0" ||
       candidate === "no"
@@ -397,16 +440,23 @@ export function normalizeCondition(
   const stripped = rawCondition
     .trim()
     .toLowerCase()
+    .replace(/\b(?:reverse\s+)?holofoil\b/g, "")
     .replace(/\bfoil\s*etched\b/g, "")
+    .replace(/\betched\s*foil\b/g, "")
     .replace(/\betched\b/g, "")
+    .replace(/\bnon[\s_-]*foil\b/g, "")
     .replace(/\bfoil\b/g, "")
+    .replace(/\bnormal\b/g, "")
     .trim();
 
   if (stripped === "") {
     return "NM";
   }
 
-  const token = stripped.replace(/[\s_-]+/g, "");
+  const token = stripped.replace(/[^a-z0-9]+/g, "");
+  if (token === "" || token === "undamaged") {
+    return "NM";
+  }
 
   switch (token) {
     case "nm":
@@ -449,8 +499,37 @@ export function normalizeCondition(
     case "d":
       return "DMG";
 
-    default:
+    default: {
+      if (token.includes("damaged") || token.startsWith("dmg")) {
+        return "DMG";
+      }
+      if (
+        token.includes("heavilyplayed") ||
+        token.includes("heavyplayed") ||
+        token.startsWith("poor") ||
+        token.startsWith("hp")
+      ) {
+        return "HP";
+      }
+      if (
+        token.includes("moderatelyplayed") ||
+        token.includes("moderateplayed") ||
+        token.includes("verygood") ||
+        token.startsWith("mp")
+      ) {
+        return "MP";
+      }
+      if (
+        token.includes("lightlyplayed") ||
+        token.includes("lightplayed") ||
+        token.includes("slightlyplayed") ||
+        token.includes("excellent") ||
+        token.startsWith("lp")
+      ) {
+        return "LP";
+      }
       return "NM";
+    }
   }
 }
 
@@ -564,13 +643,17 @@ function getColumnValue(
   rowMap: ReadonlyMap<string, string>,
   ...candidateNames: string[]
 ): string | undefined {
+  let sawEmptyCandidate = false;
   for (const name of candidateNames) {
     const val = rowMap.get(name);
     if (val !== undefined) {
-      return val;
+      if (val !== "") {
+        return val;
+      }
+      sawEmptyCandidate = true;
     }
   }
-  return undefined;
+  return sawEmptyCandidate ? "" : undefined;
 }
 
 /**
@@ -603,8 +686,13 @@ export function parseScannerCsv(
     }
 
     const rawQuantity =
-      getColumnValue(normalizedRowMap, "quantity", "qty", "add to quantity") ??
-      "";
+      getColumnValue(
+        normalizedRowMap,
+        "quantity",
+        "qty",
+        "count",
+        "add to quantity",
+      ) ?? "";
     if (rawQuantity === "" || !/^-?\d+$/.test(rawQuantity)) {
       skippedRows.push({
         rowNumber: record.rowNumber,
@@ -645,18 +733,18 @@ export function parseScannerCsv(
     let isMisprint = false;
 
     if (format === "manabox") {
-      cardName = getColumnValue(normalizedRowMap, "name") || null;
+      cardName = getColumnValue(normalizedRowMap, "name", "card name") || null;
       scryfallId = normalizeScryfallId(
         getColumnValue(normalizedRowMap, "scryfall id"),
       );
       setCode = normalizeSetCode(getColumnValue(normalizedRowMap, "set code"));
       setName = getColumnValue(normalizedRowMap, "set name") || null;
       collectorNumber = normalizeCollectorNumber(
-        getColumnValue(normalizedRowMap, "collector number"),
+        getColumnValue(normalizedRowMap, "collector number", "card number"),
       );
       const rawCondition = getColumnValue(normalizedRowMap, "condition");
       finish = normalizeFinish(
-        getColumnValue(normalizedRowMap, "foil"),
+        getColumnValue(normalizedRowMap, "foil", "finish", "printing"),
         rawCondition,
       );
       condition = normalizeCondition(rawCondition);
@@ -670,9 +758,14 @@ export function parseScannerCsv(
         getColumnValue(normalizedRowMap, "misprint"),
       );
     } else if (format === "delver_lens") {
-      cardName = getColumnValue(normalizedRowMap, "name") || null;
+      cardName = getColumnValue(normalizedRowMap, "name", "card name") || null;
       scryfallId = normalizeScryfallId(
-        getColumnValue(normalizedRowMap, "scryfall id"),
+        getColumnValue(
+          normalizedRowMap,
+          "scryfall id",
+          "scryfall uuid",
+          "uuid",
+        ),
       );
       setCode = normalizeSetCode(
         getColumnValue(normalizedRowMap, "edition code", "set code"),
@@ -683,11 +776,12 @@ export function parseScannerCsv(
           normalizedRowMap,
           "collector's number",
           "collector number",
+          "card number",
         ),
       );
       const rawCondition = getColumnValue(normalizedRowMap, "condition");
       finish = normalizeFinish(
-        getColumnValue(normalizedRowMap, "foil"),
+        getColumnValue(normalizedRowMap, "foil", "finish", "printing"),
         rawCondition,
       );
       condition = normalizeCondition(rawCondition);
@@ -702,19 +796,35 @@ export function parseScannerCsv(
       );
     } else if (format === "tcgplayer_app") {
       cardName =
-        getColumnValue(normalizedRowMap, "simple name", "name") || null;
+        getColumnValue(
+          normalizedRowMap,
+          "simple name",
+          "product name",
+          "name",
+          "title",
+        ) || null;
       scryfallId = normalizeScryfallId(
         getColumnValue(normalizedRowMap, "scryfall id"),
       );
       tcgplayerProductId = normalizeTcgplayerProductId(
-        getColumnValue(normalizedRowMap, "product id"),
+        getColumnValue(normalizedRowMap, "product id", "tcgplayer id"),
       );
       setCode = normalizeSetCode(getColumnValue(normalizedRowMap, "set code"));
       setName = getColumnValue(normalizedRowMap, "set", "set name") || null;
       collectorNumber = normalizeCollectorNumber(
-        getColumnValue(normalizedRowMap, "card number", "collector number"),
+        getColumnValue(
+          normalizedRowMap,
+          "card number",
+          "collector number",
+          "number",
+        ),
       );
-      const rawPrinting = getColumnValue(normalizedRowMap, "printing");
+      const rawPrinting = getColumnValue(
+        normalizedRowMap,
+        "printing",
+        "foil",
+        "finish",
+      );
       const rawCondition = getColumnValue(normalizedRowMap, "condition");
       finish = normalizeFinish(rawPrinting, rawCondition);
       condition = normalizeCondition(rawCondition);
@@ -735,14 +845,19 @@ export function parseScannerCsv(
         getColumnValue(normalizedRowMap, "scryfall id"),
       );
       tcgplayerProductId = normalizeTcgplayerProductId(
-        getColumnValue(normalizedRowMap, "product id"),
+        getColumnValue(normalizedRowMap, "product id", "tcgplayer id"),
       );
       setCode = normalizeSetCode(getColumnValue(normalizedRowMap, "set code"));
-      setName = getColumnValue(normalizedRowMap, "set name") || null;
+      setName = getColumnValue(normalizedRowMap, "set name", "set") || null;
       collectorNumber = normalizeCollectorNumber(
         getColumnValue(normalizedRowMap, "card number", "collector number"),
       );
-      const rawPrinting = getColumnValue(normalizedRowMap, "printing");
+      const rawPrinting = getColumnValue(
+        normalizedRowMap,
+        "printing",
+        "foil",
+        "finish",
+      );
       const rawCondition = getColumnValue(normalizedRowMap, "condition");
       finish = normalizeFinish(rawPrinting, rawCondition);
       condition = normalizeCondition(rawCondition);
