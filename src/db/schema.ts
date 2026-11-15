@@ -6,6 +6,7 @@ import {
   integer,
   numeric,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uuid,
@@ -28,6 +29,17 @@ export type AssignedBucket = (typeof ASSIGNED_BUCKETS)[number];
 
 export const CONDUIT_TIERS = ["sorted", "curated", "standard"] as const;
 export type ConduitTierPreference = (typeof CONDUIT_TIERS)[number];
+
+export const COLLECTION_LOT_STATUSES = [
+  "draft",
+  "routed",
+  "shipped",
+  "settled",
+] as const;
+export type CollectionLotStatus = (typeof COLLECTION_LOT_STATUSES)[number];
+
+export const SKU_PRICE_SOURCES = ["tcgapis", "justtcg"] as const;
+export type SkuPriceSource = (typeof SKU_PRICE_SOURCES)[number] | (string & {});
 
 const usdNumeric = (columnName: string) =>
   numeric(columnName, { precision: 10, scale: 2 });
@@ -59,14 +71,18 @@ export const cardCatalog = pgTable(
     tcgMarketFoil: usdNumeric("tcg_market_foil"),
     tcgLowFoil: usdNumeric("tcg_low_foil"),
     tcgMarketEtched: usdNumeric("tcg_market_etched"),
+    tcgLowEtched: usdNumeric("tcg_low_etched"),
     manapoolLowNm: usdNumeric("manapool_low_nm"),
     manapoolLowFoil: usdNumeric("manapool_low_foil"),
+    manapoolLowEtched: usdNumeric("manapool_low_etched"),
 
     // Cached Nightly Wholesale Buylist (USD)
     ckBuylistCashNm: usdNumeric("ck_buylist_cash_nm"),
     ckBuylistCreditNm: usdNumeric("ck_buylist_credit_nm"),
     ckBuylistCashFoil: usdNumeric("ck_buylist_cash_foil"),
     ckBuylistCreditFoil: usdNumeric("ck_buylist_credit_foil"),
+    ckBuylistCashEtched: usdNumeric("ck_buylist_cash_etched"),
+    ckBuylistCreditEtched: usdNumeric("ck_buylist_credit_etched"),
 
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .defaultNow()
@@ -83,7 +99,41 @@ export const cardCatalog = pgTable(
 );
 
 /**
- * 2. User Cost & Routing Profile (Customizable per Flipper)
+ * 2. Selective Paid Condition/SKU Price Cache (24h TTL, Prevents Duplicate API Billing)
+ */
+export const skuPriceCache = pgTable(
+  "sku_price_cache",
+  {
+    scryfallId: uuid("scryfall_id")
+      .notNull()
+      .references(() => cardCatalog.scryfallId, { onDelete: "cascade" }),
+    finish: varchar("finish", { length: 16 }).$type<CardFinish>().notNull(),
+    condition: varchar("condition", { length: 8 })
+      .$type<CardCondition>()
+      .notNull(),
+    retailLowUsd: usdNumeric("retail_low_usd"),
+    retailMarketUsd: usdNumeric("retail_market_usd"),
+    buylistCashUsd: usdNumeric("buylist_cash_usd"),
+    buylistCreditUsd: usdNumeric("buylist_credit_usd"),
+    source: varchar("source", { length: 32 }).$type<SkuPriceSource>().notNull(),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true })
+      .default(sql`NOW() + INTERVAL '24 hours'`)
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: "sku_price_cache_pkey",
+      columns: [table.scryfallId, table.finish, table.condition],
+    }),
+    index("idx_sku_price_cache_expires_at").on(table.expiresAt),
+  ],
+);
+
+/**
+ * 3. User Cost & Routing Profile (Customizable per Flipper)
  */
 export const userRoutingProfiles = pgTable("user_routing_profiles", {
   userId: uuid("user_id").primaryKey(),
@@ -102,6 +152,11 @@ export const userRoutingProfiles = pgTable("user_routing_profiles", {
   trackedThresholdUsd: usdNumeric("tracked_threshold_usd")
     .notNull()
     .default("25.00"),
+  outboundBuylistBoxShippingUsd: usdNumeric(
+    "outbound_buylist_box_shipping_usd",
+  )
+    .notNull()
+    .default("12.00"),
   minSingleNetGainOverBuylistUsd: usdNumeric(
     "min_single_net_gain_over_buylist_usd",
   )
@@ -114,10 +169,17 @@ export const userRoutingProfiles = pgTable("user_routing_profiles", {
     .$type<ConduitTierPreference>()
     .notNull()
     .default("curated"),
+  monthlySkuApiQuota: integer("monthly_sku_api_quota").notNull().default(0),
+  monthlySkuApiUsed: integer("monthly_sku_api_used").notNull().default(0),
+  skuApiQuotaResetAt: timestamp("sku_api_quota_reset_at", {
+    withTimezone: true,
+  })
+    .notNull()
+    .default(sql`DATE_TRUNC('month', NOW()) + INTERVAL '1 month'`),
 });
 
 /**
- * 3. Collection Acquisition Lots (For ROI & 1099 Schedule C Tracking)
+ * 4. Collection Acquisition Lots (For ROI & 1099 Schedule C Tracking)
  */
 export const collectionLots = pgTable(
   "collection_lots",
@@ -130,8 +192,13 @@ export const collectionLots = pgTable(
       .default(sql`CURRENT_DATE`),
     purchaseCostUsd: usdNumeric("purchase_cost_usd").notNull(),
     totalCards: integer("total_cards").notNull().default(0),
+    status: varchar("status", { length: 16 })
+      .$type<CollectionLotStatus>()
+      .notNull()
+      .default("draft"),
     estimatedGrossValueUsd: usdNumeric("estimated_gross_value_usd"),
     estimatedNetPayoutUsd: usdNumeric("estimated_net_payout_usd"),
+    actualRealizedPayoutUsd: usdNumeric("actual_realized_payout_usd"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
@@ -140,7 +207,7 @@ export const collectionLots = pgTable(
 );
 
 /**
- * 4. Routed Line Items within a Lot
+ * 5. Routed Line Items within a Lot
  */
 export const lotItems = pgTable(
   "lot_items",
@@ -159,6 +226,12 @@ export const lotItems = pgTable(
       .$type<CardCondition>()
       .notNull()
       .default("NM"),
+    language: varchar("language", { length: 16 }).notNull().default("en"),
+    isAltered: boolean("is_altered").notNull().default(false),
+    isMisprint: boolean("is_misprint").notNull().default(false),
+
+    // Proportional FMV Unit Cost Basis (IRS Schedule C COGS)
+    allocatedCostBasisUsd: usdNumeric("allocated_cost_basis_usd"),
 
     // Computed Channel Net Payouts (Per Single Copy)
     netTcgplayerSingle: usdNumeric("net_tcgplayer_single"),
@@ -185,6 +258,14 @@ export const lotItems = pgTable(
 
 export const cardCatalogRelations = relations(cardCatalog, ({ many }) => ({
   lotItems: many(lotItems),
+  skuPrices: many(skuPriceCache),
+}));
+
+export const skuPriceCacheRelations = relations(skuPriceCache, ({ one }) => ({
+  card: one(cardCatalog, {
+    fields: [skuPriceCache.scryfallId],
+    references: [cardCatalog.scryfallId],
+  }),
 }));
 
 export const collectionLotsRelations = relations(
@@ -207,6 +288,9 @@ export const lotItemsRelations = relations(lotItems, ({ one }) => ({
 
 export type CardCatalogItem = typeof cardCatalog.$inferSelect;
 export type NewCardCatalogItem = typeof cardCatalog.$inferInsert;
+
+export type SkuPriceCacheItem = typeof skuPriceCache.$inferSelect;
+export type NewSkuPriceCacheItem = typeof skuPriceCache.$inferInsert;
 
 export type UserRoutingProfile = typeof userRoutingProfiles.$inferSelect;
 export type NewUserRoutingProfile = typeof userRoutingProfiles.$inferInsert;

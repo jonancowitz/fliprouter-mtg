@@ -1,6 +1,6 @@
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   cardCatalog,
   collectionLots,
   lotItems,
+  skuPriceCache,
   userRoutingProfiles,
 } from "../../src/db/schema";
 
@@ -28,7 +29,7 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
     await client.close();
   });
 
-  it("creates all four required tables with NUMERIC(10, 2) currency columns", async () => {
+  it("creates all five required tables with NUMERIC(10, 2) currency columns", async () => {
     const tablesResult = await client.query<{ table_name: string }>(`
       SELECT table_name
       FROM information_schema.tables
@@ -40,6 +41,7 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       "card_catalog",
       "collection_lots",
       "lot_items",
+      "sku_price_cache",
       "user_routing_profiles",
     ]);
 
@@ -55,21 +57,22 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       ORDER BY table_name, column_name;
     `);
 
-    expect(numericCols.rows.length).toBeGreaterThanOrEqual(22);
+    expect(numericCols.rows.length).toBeGreaterThanOrEqual(33);
     for (const col of numericCols.rows) {
       expect(col.numeric_precision).toBe(10);
       expect(col.numeric_scale).toBe(2);
     }
   });
 
-  it("maintains required indexes idx_card_lookup (LOWER(set_code), collector_number) and idx_tcgplayer_id", async () => {
+  it("maintains required indexes on card_catalog and sku_price_cache", async () => {
     const indexesResult = await client.query<{
+      tablename: string;
       indexname: string;
       indexdef: string;
     }>(`
-      SELECT indexname, indexdef
+      SELECT tablename, indexname, indexdef
       FROM pg_indexes
-      WHERE schemaname = 'public' AND tablename = 'card_catalog';
+      WHERE schemaname = 'public';
     `);
 
     const byName = new Map(
@@ -84,9 +87,12 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       "collector_number",
     );
     expect(byName.has("idx_tcgplayer_id")).toBe(true);
+    expect(byName.has("idx_tcgplayer_etched_id")).toBe(true);
+    expect(byName.has("sku_price_cache_pkey")).toBe(true);
+    expect(byName.has("idx_sku_price_cache_expires_at")).toBe(true);
   });
 
-  it("supports card_catalog upsert on scryfall_id and case-insensitive set lookup", async () => {
+  it("supports card_catalog etched columns, upsert on scryfall_id, and case-insensitive set lookup", async () => {
     const scryfallId = "7673784e-db4b-43a1-8d55-1bb9fc1e284f";
     const oracleId = "4457ed35-7c10-48c8-9776-456485fdf070";
 
@@ -94,18 +100,23 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       scryfallId,
       oracleId,
       tcgplayerId: 697344,
+      tcgplayerEtchedId: 697345,
       name: "Lightning Bolt",
       setCode: "2x2",
       setName: "Double Masters 2022",
       collectorNumber: "117",
       rarity: "uncommon",
-      finishes: ["nonfoil", "foil"],
+      finishes: ["nonfoil", "foil", "etched"],
       tcgMarketNm: "2.45",
+      tcgMarketEtched: "6.40",
+      tcgLowEtched: "5.95",
+      manapoolLowEtched: "5.80",
       ckBuylistCashNm: "1.20",
       ckBuylistCreditNm: "1.56",
+      ckBuylistCashEtched: "3.50",
+      ckBuylistCreditEtched: "4.55",
     });
 
-    // Upsert updated price via ON CONFLICT (scryfall_id) DO UPDATE
     await db
       .insert(cardCatalog)
       .values({
@@ -117,7 +128,7 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
         setName: "Double Masters 2022",
         collectorNumber: "117",
         rarity: "uncommon",
-        finishes: ["nonfoil", "foil"],
+        finishes: ["nonfoil", "foil", "etched"],
         tcgMarketNm: "2.75",
       })
       .onConflictDoUpdate({
@@ -136,12 +147,60 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       );
 
     expect(found).toHaveLength(1);
-    expect(found[0]?.tcgMarketNm).toBe("2.75");
-    expect(found[0]?.ckBuylistCashNm).toBe("1.20");
-    expect(found[0]?.finishes).toEqual(["nonfoil", "foil"]);
+    expect(found[0]).toMatchObject({
+      tcgMarketNm: "2.75",
+      tcgMarketEtched: "6.40",
+      tcgLowEtched: "5.95",
+      manapoolLowEtched: "5.80",
+      ckBuylistCashEtched: "3.50",
+      ckBuylistCreditEtched: "4.55",
+    });
   });
 
-  it("applies exact spec defaults on user_routing_profiles and cascades lot_items deletion", async () => {
+  it("stores 24h TTL condition quotes in sku_price_cache keyed on (scryfall_id, finish, condition)", async () => {
+    const scryfallId = "7673784e-db4b-43a1-8d55-1bb9fc1e284f";
+
+    const [cached] = await db
+      .insert(skuPriceCache)
+      .values({
+        scryfallId,
+        finish: "foil",
+        condition: "LP",
+        retailLowUsd: "4.10",
+        retailMarketUsd: "4.35",
+        buylistCashUsd: "2.25",
+        buylistCreditUsd: "2.93",
+        source: "tcgapis",
+      })
+      .returning();
+
+    expect(cached).toMatchObject({
+      scryfallId,
+      finish: "foil",
+      condition: "LP",
+      retailLowUsd: "4.10",
+      buylistCashUsd: "2.25",
+      source: "tcgapis",
+    });
+    expect(cached!.expiresAt.getTime()).toBeGreaterThan(
+      cached!.fetchedAt.getTime() + 23 * 60 * 60 * 1000,
+    );
+
+    const freshHits = await db
+      .select()
+      .from(skuPriceCache)
+      .where(
+        and(
+          eq(skuPriceCache.scryfallId, scryfallId),
+          eq(skuPriceCache.finish, "foil"),
+          eq(skuPriceCache.condition, "LP"),
+          gt(skuPriceCache.expiresAt, sql`NOW()`),
+        ),
+      );
+    expect(freshHits).toHaveLength(1);
+  });
+
+  it("applies box shipping, API quota, Schedule C COGS, and quarantine defaults with cascading deletes", async () => {
     const userId = "11111111-2222-3333-4444-555555555555";
     const scryfallId = "7673784e-db4b-43a1-8d55-1bb9fc1e284f";
 
@@ -157,10 +216,14 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       pweShippingCostUsd: "0.90",
       trackedShippingCostUsd: "4.25",
       trackedThresholdUsd: "25.00",
+      outboundBuylistBoxShippingUsd: "12.00",
       minSingleNetGainOverBuylistUsd: "1.25",
       enableCreditArbitrage: false,
       conduitTierPreference: "curated",
+      monthlySkuApiQuota: 0,
+      monthlySkuApiUsed: 0,
     });
+    expect(profile?.skuApiQuotaResetAt).toBeInstanceOf(Date);
 
     const [lot] = await db
       .insert(collectionLots)
@@ -169,30 +232,39 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
         lotName: "Saturday Garage Binder Buy",
         purchaseCostUsd: "350.00",
         totalCards: 2,
+        actualRealizedPayoutUsd: "485.50",
       })
       .returning();
 
-    expect(lot?.lotId).toBeDefined();
-    expect(lot?.purchaseCostUsd).toBe("350.00");
-
-    await db.insert(lotItems).values({
-      lotId: lot!.lotId,
-      scryfallId,
-      quantity: 2,
-      finish: "normal",
-      condition: "NM",
-      netTcgplayerSingle: "0.19",
-      netCkCash: "1.20",
-      assignedBucket: "PILE_1_BUYLIST",
-      recommendedChannel: "ck_cash",
-      optimalUnitNetUsd: "1.20",
+    expect(lot).toMatchObject({
+      purchaseCostUsd: "350.00",
+      status: "draft",
+      actualRealizedPayoutUsd: "485.50",
     });
 
-    const itemsBefore = await db
-      .select()
-      .from(lotItems)
-      .where(eq(lotItems.lotId, lot!.lotId));
-    expect(itemsBefore).toHaveLength(1);
+    const [insertedItem] = await db
+      .insert(lotItems)
+      .values({
+        lotId: lot!.lotId,
+        scryfallId,
+        quantity: 2,
+        finish: "normal",
+        condition: "NM",
+        allocatedCostBasisUsd: "1.50",
+        netTcgplayerSingle: "0.19",
+        netCkCash: "1.20",
+        assignedBucket: "PILE_1_BUYLIST",
+        recommendedChannel: "ck_cash",
+        optimalUnitNetUsd: "1.20",
+      })
+      .returning();
+
+    expect(insertedItem).toMatchObject({
+      language: "en",
+      isAltered: false,
+      isMisprint: false,
+      allocatedCostBasisUsd: "1.50",
+    });
 
     await db
       .delete(collectionLots)
@@ -205,7 +277,7 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
     expect(itemsAfter).toHaveLength(0);
   });
 
-  it("executes Python sync_catalog.py SQL upsert and update statements against PostgreSQL", async () => {
+  it("executes Python sync_catalog.py SQL upsert, etched price, Mana Pool supplement, and cache prune queries", async () => {
     const scryfallId = "0000579f-7b35-4ed3-b44c-db2a538066fe";
     const oracleId = "44623693-51d6-49ad-8cd7-140505caf02f";
     const mtgjsonUuid = "0003caab-9ff5-5d1a-bc06-976dd0457f19";
@@ -245,11 +317,11 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
         "Time Spiral",
         "157",
         "uncommon",
-        ["nonfoil", "foil"],
+        ["nonfoil", "foil", "etched"],
         "https://cards.scryfall.io/normal/fury_sliver.jpg",
         "0.43",
         "1.58",
-        null,
+        "3.10",
       ],
     );
 
@@ -275,7 +347,7 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       [mtgjsonUuid, scryfallId, 121001, 121002],
     );
 
-    // Stage 3: MTGJSON AllPricesToday update by mtgjson_uuid
+    // Stage 3: MTGJSON AllPricesToday update including etched buylist
     await client.query(
       `
       UPDATE card_catalog
@@ -284,11 +356,44 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
         manapool_low_nm = COALESCE($2, manapool_low_nm),
         ck_buylist_cash_nm = COALESCE($3, ck_buylist_cash_nm),
         ck_buylist_credit_nm = COALESCE($4, ck_buylist_credit_nm),
+        ck_buylist_cash_etched = COALESCE($5, ck_buylist_cash_etched),
+        ck_buylist_credit_etched = COALESCE($6, ck_buylist_credit_etched),
         updated_at = NOW()
-      WHERE mtgjson_uuid = $5::uuid;
+      WHERE mtgjson_uuid = $7::uuid;
       `,
-      ["0.49", "0.38", "0.25", "0.33", mtgjsonUuid],
+      ["0.49", "0.38", "0.25", "0.33", "1.50", "1.95", mtgjsonUuid],
     );
+
+    // Stage 4: Mana Pool public singles supplement fills only missing columns
+    await client.query(
+      `
+      UPDATE card_catalog
+      SET
+        manapool_low_nm = COALESCE(card_catalog.manapool_low_nm, $1),
+        manapool_low_foil = COALESCE(card_catalog.manapool_low_foil, $2),
+        manapool_low_etched = COALESCE(card_catalog.manapool_low_etched, $3),
+        updated_at = NOW()
+      WHERE scryfall_id = $4::uuid;
+      `,
+      ["0.99", "1.42", "2.75", scryfallId],
+    );
+
+    // Stage 5: Expired sku_price_cache pruning
+    await db.insert(skuPriceCache).values({
+      scryfallId,
+      finish: "normal",
+      condition: "LP",
+      retailLowUsd: "0.35",
+      source: "justtcg",
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+    await client.query(`DELETE FROM sku_price_cache WHERE expires_at <= NOW();`);
+
+    const remainingCache = await db
+      .select()
+      .from(skuPriceCache)
+      .where(eq(skuPriceCache.scryfallId, scryfallId));
+    expect(remainingCache).toHaveLength(0);
 
     const [synced] = await db
       .select()
@@ -301,9 +406,13 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       cardkingdomId: 121001,
       cardkingdomFoilId: 121002,
       tcgMarketNm: "0.49",
-      manapoolLowNm: "0.38",
+      manapoolLowNm: "0.38", // Preserved from MTGJSON rather than overwritten by fallback
+      manapoolLowFoil: "1.42", // Supplemented from Mana Pool singles feed
+      manapoolLowEtched: "2.75", // Supplemented from Mana Pool singles feed
       ckBuylistCashNm: "0.25",
       ckBuylistCreditNm: "0.33",
+      ckBuylistCashEtched: "1.50",
+      ckBuylistCreditEtched: "1.95",
     });
   });
 });

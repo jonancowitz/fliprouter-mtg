@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Nightly Scryfall & MTGJSON Streaming Ingestion Pipeline (04:00 UTC Cron).
+Nightly Scryfall, MTGJSON & Mana Pool Streaming Ingestion Pipeline (04:00 UTC Cron).
 
-Populates and refreshes PostgreSQL `card_catalog` in strict 4-stage order:
+Populates and refreshes PostgreSQL `card_catalog` in strict 5-stage order:
 1. Scryfall `default_cards` bulk data -> card identity + Scryfall baseline USD prices.
 2. MTGJSON `AllIdentifiers.json.bz2` -> `scryfall_id` <-> `mtgjson_uuid` & vendor IDs.
 3. MTGJSON `AllPricesToday.json.bz2` -> `tcgplayer.retail`, `cardkingdom.buylist`,
-   and `manapool.retail` daily prices.
-4. Batched PostgreSQL writes in chunks of 5,000 rows (`ON CONFLICT (scryfall_id) DO UPDATE`
-   for catalog upserts and batched updates by `scryfall_id` / `mtgjson_uuid`).
+   and `manapool.retail` daily prices across `normal`, `foil`, and `etched`.
+4. Mana Pool public singles feed (`https://manapool.com/api/v1/prices/singles`) ->
+   supplements any `normal`/`foil`/`etched` Mana Pool prices missing from MTGJSON.
+5. Batched PostgreSQL writes in chunks of 5,000 rows (`ON CONFLICT (scryfall_id) DO UPDATE`
+   for catalog upserts and batched updates by `scryfall_id` / `mtgjson_uuid`) plus
+   TTL pruning of expired `sku_price_cache` rows (`expires_at <= NOW()`).
 
 Hard Guardrails:
 - Never scrapes HTML pages from TCGplayer, Card Kingdom, or eBay.
@@ -43,9 +46,11 @@ DEFAULT_BATCH_SIZE = 5000
 SCRYFALL_BULK_METADATA_URL = "https://api.scryfall.com/bulk-data/default-cards"
 MTGJSON_IDENTIFIERS_URL = "https://mtgjson.com/api/v5/AllIdentifiers.json.bz2"
 MTGJSON_PRICES_TODAY_URL = "https://mtgjson.com/api/v5/AllPricesToday.json.bz2"
+MANAPOOL_SINGLES_URL = "https://manapool.com/api/v1/prices/singles"
 
 DEFAULT_USER_AGENT = "FlipRouterMTG/0.1 (+https://github.com/jonancowitz/fliprouter-mtg)"
 CENTS_QUANT = Decimal("0.01")
+CENTS_DIVISOR = Decimal("100")
 CK_CREDIT_MULTIPLIER = Decimal("1.30")
 
 
@@ -87,12 +92,16 @@ class PriceUpdateRecord:
     tcg_market_foil: Decimal | None = None
     tcg_low_foil: Decimal | None = None
     tcg_market_etched: Decimal | None = None
+    tcg_low_etched: Decimal | None = None
     manapool_low_nm: Decimal | None = None
     manapool_low_foil: Decimal | None = None
+    manapool_low_etched: Decimal | None = None
     ck_buylist_cash_nm: Decimal | None = None
     ck_buylist_credit_nm: Decimal | None = None
     ck_buylist_cash_foil: Decimal | None = None
     ck_buylist_credit_foil: Decimal | None = None
+    ck_buylist_cash_etched: Decimal | None = None
+    ck_buylist_credit_etched: Decimal | None = None
 
     def has_any_price(self) -> bool:
         return any(
@@ -103,12 +112,35 @@ class PriceUpdateRecord:
                 self.tcg_market_foil,
                 self.tcg_low_foil,
                 self.tcg_market_etched,
+                self.tcg_low_etched,
                 self.manapool_low_nm,
                 self.manapool_low_foil,
+                self.manapool_low_etched,
                 self.ck_buylist_cash_nm,
                 self.ck_buylist_credit_nm,
                 self.ck_buylist_cash_foil,
                 self.ck_buylist_credit_foil,
+                self.ck_buylist_cash_etched,
+                self.ck_buylist_credit_etched,
+            )
+        )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ManaPoolSingleRecord:
+    scryfall_id: str
+    tcgplayer_id: int | None = None
+    manapool_low_nm: Decimal | None = None
+    manapool_low_foil: Decimal | None = None
+    manapool_low_etched: Decimal | None = None
+
+    def has_any_price(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.manapool_low_nm,
+                self.manapool_low_foil,
+                self.manapool_low_etched,
             )
         )
 
@@ -124,6 +156,11 @@ class SyncStats:
     prices_seen: int = 0
     prices_updated: int = 0
     prices_batches: int = 0
+    manapool_seen: int = 0
+    manapool_supplemented: int = 0
+    manapool_batches: int = 0
+    manapool_fallback_failed: bool = False
+    sku_cache_pruned: int = 0
 
 
 UPSERT_SCRYFALL_SQL = """
@@ -211,14 +248,40 @@ SET
     tcg_market_foil = COALESCE(%(tcg_market_foil)s, tcg_market_foil),
     tcg_low_foil = COALESCE(%(tcg_low_foil)s, tcg_low_foil),
     tcg_market_etched = COALESCE(%(tcg_market_etched)s, tcg_market_etched),
+    tcg_low_etched = COALESCE(%(tcg_low_etched)s, tcg_low_etched),
     manapool_low_nm = COALESCE(%(manapool_low_nm)s, manapool_low_nm),
     manapool_low_foil = COALESCE(%(manapool_low_foil)s, manapool_low_foil),
+    manapool_low_etched = COALESCE(%(manapool_low_etched)s, manapool_low_etched),
     ck_buylist_cash_nm = COALESCE(%(ck_buylist_cash_nm)s, ck_buylist_cash_nm),
     ck_buylist_credit_nm = COALESCE(%(ck_buylist_credit_nm)s, ck_buylist_credit_nm),
     ck_buylist_cash_foil = COALESCE(%(ck_buylist_cash_foil)s, ck_buylist_cash_foil),
     ck_buylist_credit_foil = COALESCE(%(ck_buylist_credit_foil)s, ck_buylist_credit_foil),
+    ck_buylist_cash_etched = COALESCE(%(ck_buylist_cash_etched)s, ck_buylist_cash_etched),
+    ck_buylist_credit_etched = COALESCE(%(ck_buylist_credit_etched)s, ck_buylist_credit_etched),
     updated_at = NOW()
 WHERE mtgjson_uuid = %(mtgjson_uuid)s;
+"""
+
+SUPPLEMENT_MANAPOOL_BY_SCRYFALL_SQL = """
+UPDATE card_catalog
+SET
+    tcgplayer_id = COALESCE(card_catalog.tcgplayer_id, %(tcgplayer_id)s),
+    manapool_low_nm = COALESCE(card_catalog.manapool_low_nm, %(manapool_low_nm)s),
+    manapool_low_foil = COALESCE(card_catalog.manapool_low_foil, %(manapool_low_foil)s),
+    manapool_low_etched = COALESCE(card_catalog.manapool_low_etched, %(manapool_low_etched)s),
+    updated_at = NOW()
+WHERE scryfall_id = %(scryfall_id)s
+  AND (
+      card_catalog.manapool_low_nm IS NULL
+      OR card_catalog.manapool_low_foil IS NULL
+      OR card_catalog.manapool_low_etched IS NULL
+      OR card_catalog.tcgplayer_id IS NULL
+  );
+"""
+
+PRUNE_EXPIRED_SKU_CACHE_SQL = """
+DELETE FROM sku_price_cache
+WHERE expires_at <= NOW();
 """
 
 
@@ -228,6 +291,10 @@ class CatalogSink(Protocol):
     def update_identifier_batch(self, batch: list[IdentifierMappingRecord]) -> int: ...
 
     def update_price_batch(self, batch: list[PriceUpdateRecord]) -> int: ...
+
+    def supplement_manapool_batch(self, batch: list[ManaPoolSingleRecord]) -> int: ...
+
+    def prune_expired_sku_cache(self) -> int: ...
 
 
 class DryRunCatalogSink:
@@ -241,6 +308,12 @@ class DryRunCatalogSink:
 
     def update_price_batch(self, batch: list[PriceUpdateRecord]) -> int:
         return len(batch)
+
+    def supplement_manapool_batch(self, batch: list[ManaPoolSingleRecord]) -> int:
+        return len(batch)
+
+    def prune_expired_sku_cache(self) -> int:
+        return 0
 
 
 class PostgresCatalogSink:
@@ -285,6 +358,23 @@ class PostgresCatalogSink:
                 cur.executemany(UPDATE_PRICES_BY_MTGJSON_SQL, rows)
         return len(rows)
 
+    def supplement_manapool_batch(self, batch: list[ManaPoolSingleRecord]) -> int:
+        if not batch:
+            return 0
+        deduped = {record.scryfall_id: dataclasses.asdict(record) for record in batch}
+        rows = list(deduped.values())
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.executemany(SUPPLEMENT_MANAPOOL_BY_SCRYFALL_SQL, rows)
+        return len(rows)
+
+    def prune_expired_sku_cache(self) -> int:
+        with self._conn.transaction():
+            with self._conn.cursor() as cur:
+                cur.execute(PRUNE_EXPIRED_SKU_CACHE_SQL)
+                rowcount = getattr(cur, "rowcount", 0)
+                return int(rowcount) if isinstance(rowcount, int) and rowcount > 0 else 0
+
 
 def parse_usd(raw: Any) -> Decimal | None:
     """Convert raw JSON value into a 2-decimal USD Decimal without float rounding."""
@@ -310,6 +400,24 @@ def parse_usd(raw: Any) -> Decimal | None:
     if not dec.is_finite() or dec < 0:
         return None
     return dec.quantize(CENTS_QUANT, rounding=ROUND_HALF_UP)
+
+
+def parse_cents_to_usd(raw: Any) -> Decimal | None:
+    """Convert integer cents (e.g., Mana Pool `price_cents_nm`) into exact 2-decimal USD."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        cents = Decimal(raw)
+    elif isinstance(raw, Decimal):
+        cents = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        cents = Decimal(raw.strip())
+    else:
+        return None
+
+    if not cents.is_finite() or cents < 0:
+        return None
+    return (cents / CENTS_DIVISOR).quantize(CENTS_QUANT, rounding=ROUND_HALF_UP)
 
 
 def compute_ck_credit(
@@ -534,8 +642,10 @@ def extract_price_update(
 
     ck_cash_nm = latest_series_price(ck_buylist.get("normal"))
     ck_cash_foil = latest_series_price(ck_buylist.get("foil"))
+    ck_cash_etched = latest_series_price(ck_buylist.get("etched"))
     explicit_credit_nm = latest_series_price(ck_buylist_credit.get("normal"))
     explicit_credit_foil = latest_series_price(ck_buylist_credit.get("foil"))
+    explicit_credit_etched = latest_series_price(ck_buylist_credit.get("etched"))
 
     record = PriceUpdateRecord(
         mtgjson_uuid=mtgjson_uuid,
@@ -544,12 +654,53 @@ def extract_price_update(
         tcg_market_foil=latest_series_price(tcg_retail.get("foil")),
         tcg_low_foil=latest_series_price(tcg_retail_low.get("foil")),
         tcg_market_etched=latest_series_price(tcg_retail.get("etched")),
+        tcg_low_etched=latest_series_price(tcg_retail_low.get("etched")),
         manapool_low_nm=latest_series_price(manapool_retail.get("normal")),
         manapool_low_foil=latest_series_price(manapool_retail.get("foil")),
+        manapool_low_etched=latest_series_price(manapool_retail.get("etched")),
         ck_buylist_cash_nm=ck_cash_nm,
         ck_buylist_credit_nm=compute_ck_credit(ck_cash_nm, explicit_credit_nm),
         ck_buylist_cash_foil=ck_cash_foil,
         ck_buylist_credit_foil=compute_ck_credit(ck_cash_foil, explicit_credit_foil),
+        ck_buylist_cash_etched=ck_cash_etched,
+        ck_buylist_credit_etched=compute_ck_credit(
+            ck_cash_etched, explicit_credit_etched
+        ),
+    )
+    return record if record.has_any_price() else None
+
+
+def extract_manapool_single(entry: dict[str, Any]) -> ManaPoolSingleRecord | None:
+    if not isinstance(entry, dict):
+        return None
+
+    scryfall_id = normalize_uuid(entry.get("scryfall_id"))
+    if not scryfall_id and isinstance(entry.get("scryfall_ids"), list):
+        for candidate in entry["scryfall_ids"]:
+            scryfall_id = normalize_uuid(candidate)
+            if scryfall_id:
+                break
+    if not scryfall_id:
+        return None
+
+    nm = parse_cents_to_usd(entry.get("price_cents_nm"))
+    if nm is None:
+        nm = parse_cents_to_usd(entry.get("price_cents"))
+
+    foil = parse_cents_to_usd(entry.get("price_cents_nm_foil"))
+    if foil is None:
+        foil = parse_cents_to_usd(entry.get("price_cents_foil"))
+
+    etched = parse_cents_to_usd(entry.get("price_cents_nm_etched"))
+    if etched is None:
+        etched = parse_cents_to_usd(entry.get("price_cents_etched"))
+
+    record = ManaPoolSingleRecord(
+        scryfall_id=scryfall_id,
+        tcgplayer_id=parse_optional_int(entry.get("tcgplayer_product_id")),
+        manapool_low_nm=nm,
+        manapool_low_foil=foil,
+        manapool_low_etched=etched,
     )
     return record if record.has_any_price() else None
 
@@ -729,15 +880,40 @@ def sync_prices_stage(
         stats.prices_batches += 1
 
 
+def sync_manapool_singles_stage(
+    stream: io.BufferedReader,
+    sink: CatalogSink,
+    stats: SyncStats,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    limit: int | None = None,
+) -> None:
+    def single_records() -> Iterator[ManaPoolSingleRecord]:
+        for entry in ijson.items(stream, "data.item"):
+            stats.manapool_seen += 1
+            record = extract_manapool_single(entry)
+            if record is not None:
+                yield record
+            if limit is not None and stats.manapool_seen >= limit:
+                break
+
+    for batch in chunked(single_records(), batch_size):
+        stats.manapool_supplemented += sink.supplement_manapool_batch(batch)
+        stats.manapool_batches += 1
+
+
 def run_sync_pipeline(
     sink: CatalogSink,
     *,
     scryfall_source: str | Path | None = None,
     identifiers_source: str | Path | None = MTGJSON_IDENTIFIERS_URL,
     prices_source: str | Path | None = MTGJSON_PRICES_TODAY_URL,
+    manapool_source: str | Path | None = MANAPOOL_SINGLES_URL,
     skip_scryfall: bool = False,
     skip_identifiers: bool = False,
     skip_prices: bool = False,
+    skip_manapool: bool = False,
+    strict_manapool: bool = False,
+    skip_prune_sku_cache: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
     limit: int | None = None,
     http_client: httpx.Client | None = None,
@@ -748,7 +924,9 @@ def run_sync_pipeline(
 
         if not skip_scryfall:
             resolved_scryfall = scryfall_source or fetch_scryfall_download_uri(client)
-            LOGGER.info("Stage 1/3: Streaming Scryfall default_cards from %s", resolved_scryfall)
+            LOGGER.info(
+                "Stage 1/4: Streaming Scryfall default_cards from %s", resolved_scryfall
+            )
             with open_streaming_source(resolved_scryfall, client=client) as stream:
                 sync_scryfall_stage(
                     stream,
@@ -765,7 +943,9 @@ def run_sync_pipeline(
             )
 
         if not skip_identifiers and identifiers_source is not None:
-            LOGGER.info("Stage 2/3: Streaming MTGJSON AllIdentifiers from %s", identifiers_source)
+            LOGGER.info(
+                "Stage 2/4: Streaming MTGJSON AllIdentifiers from %s", identifiers_source
+            )
             with open_streaming_source(identifiers_source, client=client) as stream:
                 sync_identifiers_stage(
                     stream,
@@ -782,7 +962,9 @@ def run_sync_pipeline(
             )
 
         if not skip_prices and prices_source is not None:
-            LOGGER.info("Stage 3/3: Streaming MTGJSON AllPricesToday from %s", prices_source)
+            LOGGER.info(
+                "Stage 3/4: Streaming MTGJSON AllPricesToday from %s", prices_source
+            )
             with open_streaming_source(prices_source, client=client) as stream:
                 sync_prices_stage(
                     stream,
@@ -798,12 +980,44 @@ def run_sync_pipeline(
                 stats.prices_batches,
             )
 
+        if not skip_manapool and manapool_source is not None:
+            LOGGER.info(
+                "Stage 4/4: Streaming Mana Pool singles supplement from %s",
+                manapool_source,
+            )
+            try:
+                with open_streaming_source(manapool_source, client=client) as stream:
+                    sync_manapool_singles_stage(
+                        stream,
+                        sink,
+                        stats,
+                        batch_size=batch_size,
+                        limit=limit,
+                    )
+                LOGGER.info(
+                    "Stage 4 complete: seen=%d supplemented=%d batches=%d",
+                    stats.manapool_seen,
+                    stats.manapool_supplemented,
+                    stats.manapool_batches,
+                )
+            except (httpx.HTTPError, OSError, ijson.JSONError) as exc:
+                stats.manapool_fallback_failed = True
+                if strict_manapool:
+                    raise
+                LOGGER.warning(
+                    "Mana Pool singles supplement failed gracefully (continuing with MTGJSON baseline): %s",
+                    exc,
+                )
+
+        if not skip_prune_sku_cache:
+            stats.sku_cache_pruned = sink.prune_expired_sku_cache()
+
     return stats
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Stream Scryfall Bulk Data & MTGJSON AllPricesToday into PostgreSQL card_catalog."
+        description="Stream Scryfall Bulk Data, MTGJSON AllPricesToday & Mana Pool singles into PostgreSQL card_catalog."
     )
     parser.add_argument(
         "--database-url",
@@ -826,6 +1040,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Override MTGJSON AllPricesToday URL or local (.json/.bz2) path.",
     )
     parser.add_argument(
+        "--manapool-source",
+        default=MANAPOOL_SINGLES_URL,
+        help="Override Mana Pool singles JSON URL or local path.",
+    )
+    parser.add_argument(
         "--skip-scryfall",
         action="store_true",
         help="Skip Stage 1 Scryfall default_cards sync.",
@@ -839,6 +1058,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--skip-prices",
         action="store_true",
         help="Skip Stage 3 MTGJSON AllPricesToday price sync.",
+    )
+    parser.add_argument(
+        "--skip-manapool",
+        action="store_true",
+        help="Skip Stage 4 Mana Pool public singles supplement.",
+    )
+    parser.add_argument(
+        "--strict-manapool",
+        action="store_true",
+        help="Fail pipeline instead of logging warning if Mana Pool singles endpoint errors.",
+    )
+    parser.add_argument(
+        "--skip-prune-sku-cache",
+        action="store_true",
+        help="Skip pruning expired rows from sku_price_cache.",
     )
     parser.add_argument(
         "--batch-size",
@@ -882,9 +1116,13 @@ def main(argv: list[str] | None = None) -> int:
             scryfall_source=args.scryfall_source,
             identifiers_source=args.identifiers_source,
             prices_source=args.prices_source,
+            manapool_source=args.manapool_source,
             skip_scryfall=args.skip_scryfall,
             skip_identifiers=args.skip_identifiers,
             skip_prices=args.skip_prices,
+            skip_manapool=args.skip_manapool,
+            strict_manapool=args.strict_manapool,
+            skip_prune_sku_cache=args.skip_prune_sku_cache,
             batch_size=args.batch_size,
             limit=args.limit,
         )
@@ -904,9 +1142,13 @@ def main(argv: list[str] | None = None) -> int:
             scryfall_source=args.scryfall_source,
             identifiers_source=args.identifiers_source,
             prices_source=args.prices_source,
+            manapool_source=args.manapool_source,
             skip_scryfall=args.skip_scryfall,
             skip_identifiers=args.skip_identifiers,
             skip_prices=args.skip_prices,
+            skip_manapool=args.skip_manapool,
+            strict_manapool=args.strict_manapool,
+            skip_prune_sku_cache=args.skip_prune_sku_cache,
             batch_size=args.batch_size,
             limit=args.limit,
         )

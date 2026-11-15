@@ -1,0 +1,782 @@
+{
+  "id": "607ba8ff-85f4-465a-aaeb-ebe8f149ba59",
+  "prevId": "0315dc10-b6e0-43b5-9c40-1a3c46f8cbd4",
+  "version": "7",
+  "dialect": "postgresql",
+  "tables": {
+    "public.card_catalog": {
+      "name": "card_catalog",
+      "schema": "",
+      "columns": {
+        "scryfall_id": {
+          "name": "scryfall_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "mtgjson_uuid": {
+          "name": "mtgjson_uuid",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "oracle_id": {
+          "name": "oracle_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tcgplayer_id": {
+          "name": "tcgplayer_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tcgplayer_etched_id": {
+          "name": "tcgplayer_etched_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cardkingdom_id": {
+          "name": "cardkingdom_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cardkingdom_foil_id": {
+          "name": "cardkingdom_foil_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "set_code": {
+          "name": "set_code",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "set_name": {
+          "name": "set_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "collector_number": {
+          "name": "collector_number",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rarity": {
+          "name": "rarity",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "finishes": {
+          "name": "finishes",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "image_uri": {
+          "name": "image_uri",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tcg_market_nm": {
+          "name": "tcg_market_nm",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tcg_low_nm": {
+          "name": "tcg_low_nm",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tcg_market_foil": {
+          "name": "tcg_market_foil",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tcg_low_foil": {
+          "name": "tcg_low_foil",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tcg_market_etched": {
+          "name": "tcg_market_etched",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "tcg_low_etched": {
+          "name": "tcg_low_etched",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "manapool_low_nm": {
+          "name": "manapool_low_nm",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "manapool_low_foil": {
+          "name": "manapool_low_foil",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "manapool_low_etched": {
+          "name": "manapool_low_etched",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ck_buylist_cash_nm": {
+          "name": "ck_buylist_cash_nm",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ck_buylist_credit_nm": {
+          "name": "ck_buylist_credit_nm",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ck_buylist_cash_foil": {
+          "name": "ck_buylist_cash_foil",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ck_buylist_credit_foil": {
+          "name": "ck_buylist_credit_foil",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ck_buylist_cash_etched": {
+          "name": "ck_buylist_cash_etched",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ck_buylist_credit_etched": {
+          "name": "ck_buylist_credit_etched",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_card_lookup": {
+          "name": "idx_card_lookup",
+          "columns": [
+            {
+              "expression": "LOWER(\"set_code\")",
+              "asc": true,
+              "isExpression": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "collector_number",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_tcgplayer_id": {
+          "name": "idx_tcgplayer_id",
+          "columns": [
+            {
+              "expression": "tcgplayer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_tcgplayer_etched_id": {
+          "name": "idx_tcgplayer_etched_id",
+          "columns": [
+            {
+              "expression": "tcgplayer_etched_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "card_catalog_mtgjson_uuid_unique": {
+          "name": "card_catalog_mtgjson_uuid_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "mtgjson_uuid"
+          ]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.collection_lots": {
+      "name": "collection_lots",
+      "schema": "",
+      "columns": {
+        "lot_id": {
+          "name": "lot_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lot_name": {
+          "name": "lot_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "purchase_date": {
+          "name": "purchase_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "CURRENT_DATE"
+        },
+        "purchase_cost_usd": {
+          "name": "purchase_cost_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "total_cards": {
+          "name": "total_cards",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'draft'"
+        },
+        "estimated_gross_value_usd": {
+          "name": "estimated_gross_value_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "estimated_net_payout_usd": {
+          "name": "estimated_net_payout_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "actual_realized_payout_usd": {
+          "name": "actual_realized_payout_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_collection_lots_user_id": {
+          "name": "idx_collection_lots_user_id",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.lot_items": {
+      "name": "lot_items",
+      "schema": "",
+      "columns": {
+        "item_id": {
+          "name": "item_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "lot_id": {
+          "name": "lot_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scryfall_id": {
+          "name": "scryfall_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "quantity": {
+          "name": "quantity",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "finish": {
+          "name": "finish",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'normal'"
+        },
+        "condition": {
+          "name": "condition",
+          "type": "varchar(8)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'NM'"
+        },
+        "language": {
+          "name": "language",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'en'"
+        },
+        "is_altered": {
+          "name": "is_altered",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "is_misprint": {
+          "name": "is_misprint",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "allocated_cost_basis_usd": {
+          "name": "allocated_cost_basis_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "net_tcgplayer_single": {
+          "name": "net_tcgplayer_single",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "net_manapool_single": {
+          "name": "net_manapool_single",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "net_p2p_85_pct": {
+          "name": "net_p2p_85_pct",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "net_ck_cash": {
+          "name": "net_ck_cash",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "net_ck_credit": {
+          "name": "net_ck_credit",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "net_conduit_curated": {
+          "name": "net_conduit_curated",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "assigned_bucket": {
+          "name": "assigned_bucket",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "recommended_channel": {
+          "name": "recommended_channel",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "optimal_unit_net_usd": {
+          "name": "optimal_unit_net_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "idx_lot_items_lot_id": {
+          "name": "idx_lot_items_lot_id",
+          "columns": [
+            {
+              "expression": "lot_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_lot_items_scryfall_id": {
+          "name": "idx_lot_items_scryfall_id",
+          "columns": [
+            {
+              "expression": "scryfall_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "lot_items_lot_id_collection_lots_lot_id_fk": {
+          "name": "lot_items_lot_id_collection_lots_lot_id_fk",
+          "tableFrom": "lot_items",
+          "tableTo": "collection_lots",
+          "columnsFrom": [
+            "lot_id"
+          ],
+          "columnsTo": [
+            "lot_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "lot_items_scryfall_id_card_catalog_scryfall_id_fk": {
+          "name": "lot_items_scryfall_id_card_catalog_scryfall_id_fk",
+          "tableFrom": "lot_items",
+          "tableTo": "card_catalog",
+          "columnsFrom": [
+            "scryfall_id"
+          ],
+          "columnsTo": [
+            "scryfall_id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.sku_price_cache": {
+      "name": "sku_price_cache",
+      "schema": "",
+      "columns": {
+        "scryfall_id": {
+          "name": "scryfall_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "finish": {
+          "name": "finish",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "condition": {
+          "name": "condition",
+          "type": "varchar(8)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "retail_low_usd": {
+          "name": "retail_low_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "retail_market_usd": {
+          "name": "retail_market_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "buylist_cash_usd": {
+          "name": "buylist_cash_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "buylist_credit_usd": {
+          "name": "buylist_credit_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source": {
+          "name": "source",
+          "type": "varchar(32)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "fetched_at": {
+          "name": "fetched_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "NOW() + INTERVAL '24 hours'"
+        }
+      },
+      "indexes": {
+        "idx_sku_price_cache_expires_at": {
+          "name": "idx_sku_price_cache_expires_at",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "sku_price_cache_scryfall_id_card_catalog_scryfall_id_fk": {
+          "name": "sku_price_cache_scryfall_id_card_catalog_scryfall_id_fk",
+          "tableFrom": "sku_price_cache",
+          "tableTo": "card_catalog",
+          "columnsFrom": [
+            "scryfall_id"
+          ],
+          "columnsTo": [
+            "scryfall_id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "sku_price_cache_pkey": {
+          "name": "sku_price_cache_pkey",
+          "columns": [
+            "scryfall_id",
+            "finish",
+            "condition"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.user_routing_profiles": {
+      "name": "user_routing_profiles",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "hourly_labor_rate_usd": {
+          "name": "hourly_labor_rate_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'20.00'"
+        },
+        "seconds_per_single_order": {
+          "name": "seconds_per_single_order",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 180
+        },
+        "pwe_shipping_cost_usd": {
+          "name": "pwe_shipping_cost_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0.90'"
+        },
+        "tracked_shipping_cost_usd": {
+          "name": "tracked_shipping_cost_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'4.25'"
+        },
+        "tracked_threshold_usd": {
+          "name": "tracked_threshold_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'25.00'"
+        },
+        "outbound_buylist_box_shipping_usd": {
+          "name": "outbound_buylist_box_shipping_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'12.00'"
+        },
+        "min_single_net_gain_over_buylist_usd": {
+          "name": "min_single_net_gain_over_buylist_usd",
+          "type": "numeric(10, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'1.25'"
+        },
+        "enable_credit_arbitrage": {
+          "name": "enable_credit_arbitrage",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "conduit_tier_preference": {
+          "name": "conduit_tier_preference",
+          "type": "varchar(16)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'curated'"
+        },
+        "monthly_sku_api_quota": {
+          "name": "monthly_sku_api_quota",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "monthly_sku_api_used": {
+          "name": "monthly_sku_api_used",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "sku_api_quota_reset_at": {
+          "name": "sku_api_quota_reset_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "DATE_TRUNC('month', NOW()) + INTERVAL '1 month'"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    }
+  },
+  "enums": {},
+  "schemas": {},
+  "sequences": {},
+  "roles": {},
+  "policies": {},
+  "views": {},
+  "_meta": {
+    "columns": {},
+    "schemas": {},
+    "tables": {}
+  }
+}
