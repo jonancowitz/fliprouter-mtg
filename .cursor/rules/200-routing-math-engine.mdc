@@ -1,0 +1,26 @@
+---
+description: Deterministic fee formulas, condition multipliers, and 4-bucket routing tree
+globs: ["**/routing/**/*.ts", "**/pricing/**/*.ts", "**/engine/**/*.py"]
+alwaysApply: false
+---
+
+# Liquidation Math & 4-Bucket Decision Tree
+
+## 1. Condition Multipliers (Fallback when using NM Cache)
+- **Retail:** `NM = 1.00`, `LP = 0.88`, `MP = 0.72`, `HP = 0.52`, `DMG = 0.35`
+- **Buylist:** `NM = 1.00`, `LP = 0.80`, `MP = 0.65`, `HP = 0.50` (Apply an extra `0.90` multiplier to non-NM foils).
+
+## 2. Net Payout Formulas (Per Card)
+- `C_labor = (seconds_per_single_order / 3600) * hourly_labor_rate_usd`
+- `C_ship = (P_retail < tracked_threshold_usd) ? pwe_shipping_cost_usd : tracked_shipping_cost_usd`
+- **TCGplayer Single:** `Net_TCG = (P_retail * 0.8675) - 0.30 - C_ship - C_labor` (Capping the 10.75% commission portion at $75.00).
+- **Mana Pool Single:** `Net_MP = (P_retail * 0.921) - 0.30 - C_ship - C_labor`
+- **P2P 85% Claim Sale:** `Net_P2P = ((P_retail * 0.85) * 0.965) - C_ship - (0.5 * C_labor)`
+- **Buylist Net:** `Net_CK_Cash = P_buy_CK`; `Net_Conduit_Sorted = P_buy * 0.98`; `Net_Conduit_Curated = P_buy * 0.95`.
+- **Store Credit Arbitrage:** `Net_Credit_Arb = (P_buy_CK * 1.30) * 0.82`
+
+## 3. Strict Evaluation Order
+1. `PILE_4_BULK`: `P_buy < 0.50` AND `max(Net_TCG, Net_MP) < 0.75`.
+2. `PILE_1_BUYLIST`: `P_buy >= 0.50` AND `(max(Net_TCG, Net_MP, Net_P2P) - Net_Buylist) < min_single_net_gain_over_buylist_usd`.
+3. `PILE_3_CREDIT_ARB`: `enable_credit_arbitrage == true` AND `Net_Credit_Arb > max(Net_TCG, Net_MP)`.
+4. `PILE_2_SINGLES`: All remaining high-spread cards.

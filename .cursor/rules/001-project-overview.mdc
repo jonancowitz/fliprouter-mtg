@@ -1,0 +1,16 @@
+---
+description: Core stack, architecture, and hard guardrails for FlipRouter MTG
+alwaysApply: true
+---
+
+# FlipRouter MTG — Core Architecture & Guardrails
+
+- **Product:** MTG Collection Flipper & Buylist Liquidation Router SaaS.
+- **Stack:** Next.js (App Router), TypeScript (strict mode), Tailwind CSS, shadcn/ui, PostgreSQL (Drizzle ORM), Python 3.12 (`polars`/`pandas`/`ijson` for bulk data sync).
+- **Full Spec Reference:** Read `@docs/SPEC.md` when scaffolding new modules.
+
+## Hard Guardrails (NEVER Violate)
+1. **NEVER scrape HTML pages** from TCGplayer, Card Kingdom, or eBay.
+2. **95% Local DB Rule:** Resolve all standard card lookups and NM pricing against our local PostgreSQL `card_catalog` table (populated nightly via Scryfall Bulk + MTGJSON `AllPricesToday.json`).
+3. **Selective Live API Rule:** Only call external paid SKU APIs (TCGAPIs / JustTCG) if `tcg_market_nm >= 8.00` OR `condition != 'NM'`.
+4. **No Floating-Point Currency Math:** Always use integer cents or `Decimal` / `NUMERIC(10,2)` for fee and payout calculations—never raw JS floats.

@@ -1,0 +1,13 @@
+---
+description: CSV ingestion normalization for ManaBox, Delver Lens, TCGplayer and manifest exports
+globs: ["**/csv/**/*.ts", "**/parsers/**/*.ts", "**/exports/**/*.ts"]
+alwaysApply: false
+---
+
+# Scanner CSV Ingestion & Manifest Export Rules
+
+- Auto-detect scanner source by header signature and normalize to `{ scryfallId, setCode, collectorNumber, finish, condition, quantity }`.
+- **ManaBox:** Read `Scryfall ID` directly. Map `Foil` (`normal`, `foil`, `etched`). Map `Condition` (`near_mint`->`NM`, `lightly_played`->`LP`, `moderately_played`->`MP`, `heavily_played`->`HP`, `damaged`->`DMG`).
+- **Delver Lens:** Read `Scryfall ID`. Normalize `Foil` boolean/string.
+- **TCGplayer App:** Match `Product ID` against `card_catalog.tcgplayer_id` (or `tcgplayer_etched_id`). Fallback to `(LOWER(Set Code), Card Number)`.
+- **Card Conduit Export Validation:** Ensure >= 90% of total quantity has `P_buy >= 0.50` before exporting Curated/Sorted CSVs.

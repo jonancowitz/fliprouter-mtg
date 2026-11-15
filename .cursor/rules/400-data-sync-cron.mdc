@@ -1,0 +1,13 @@
+---
+description: Use when building or modifying the nightly Python data sync for Scryfall Bulk Data and MTGJSON AllPricesToday
+alwaysApply: false
+---
+
+# Nightly Scryfall & MTGJSON Ingestion Pipeline
+
+- Never load the entire 450MB Scryfall JSON or `AllPricesToday.json` into memory at once; use streaming JSON parsers (`ijson` in Python) or chunked processing.
+- Sync order at 04:00 UTC:
+  1. Download Scryfall `default_cards` bulk URI -> upsert identity and baseline prices.
+  2. Map `scryfall_id` to `mtgjson_uuid` via `AllIdentifiers.json.bz2`.
+  3. Stream `AllPricesToday.json.bz2` -> extract `tcgplayer.retail`, `cardkingdom.buylist`, and `manapool.retail` for `normal` and `foil`.
+  4. Bulk upsert into PostgreSQL `card_catalog` in batches of 5,000 rows using `ON CONFLICT (scryfall_id) DO UPDATE`.

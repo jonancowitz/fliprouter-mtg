@@ -1,0 +1,12 @@
+---
+description: PostgreSQL schema conventions for card_catalog, collection_lots, and lot_items
+globs: ["**/db/**/*.ts", "**/schema/**/*.ts", "**/*.sql", "**/migrations/**"]
+alwaysApply: false
+---
+
+# Database Schema & Indexing Rules
+
+- Use `scryfall_id` (UUID) as the primary foreign key across all user lot tables; map `mtgjson_uuid` and `tcgplayer_id` on `card_catalog`.
+- Store all currency columns as `NUMERIC(10, 2)` in PostgreSQL.
+- Required tables: `card_catalog`, `user_routing_profiles`, `collection_lots`, and `lot_items`.
+- Always maintain composite index `idx_card_lookup ON card_catalog (LOWER(set_code), collector_number)` and `idx_tcgplayer_id ON card_catalog (tcgplayer_id)`.
