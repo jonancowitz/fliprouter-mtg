@@ -22,6 +22,9 @@ next-env.d.ts
 # Testing & coverage
 coverage/
 
+# Local embedded PGlite prototype database
+.data/
+
 # Environment variables
 .env
 .env.*

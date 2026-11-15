@@ -15,6 +15,13 @@
       "when": 1794710417958,
       "tag": "0001_wandering_union_jack",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794717509677,
+      "tag": "0002_foamy_adam_warlock",
+      "breakpoints": true
     }
   ]
 }

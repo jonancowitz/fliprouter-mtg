@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased selection:bg-emerald-500/30 selection:text-emerald-200;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+}
+
+/* Custom sleek range inputs for live routing sliders */
+input[type="range"].fliprouter-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 9999px;
+  background: rgb(30 41 59);
+  outline: none;
+}
+
+input[type="range"].fliprouter-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: rgb(16 185 129);
+  border: 2px solid rgb(2 6 23);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.45);
+  cursor: pointer;
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+
+input[type="range"].fliprouter-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+  background: rgb(52 211 153);
+}
+
+input[type="range"].fliprouter-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: rgb(16 185 129);
+  border: 2px solid rgb(2 6 23);
+  box-shadow: 0 0 0 1px rgba(16, 185, 129, 0.45);
+  cursor: pointer;
+}

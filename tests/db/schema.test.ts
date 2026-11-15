@@ -529,12 +529,13 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
   });
 
   it("caches getDb() singleton in NODE_ENV=production and exposes Step 3 finish/channel helpers", async () => {
-    const prevNodeEnv = process.env.NODE_ENV;
-    const prevDbUrl = process.env.DATABASE_URL;
+    const mutableEnv = process.env as Record<string, string | undefined>;
+    const prevNodeEnv = mutableEnv.NODE_ENV;
+    const prevDbUrl = mutableEnv.DATABASE_URL;
     try {
       await closeDb();
-      process.env.NODE_ENV = "production";
-      process.env.DATABASE_URL =
+      mutableEnv.NODE_ENV = "production";
+      mutableEnv.DATABASE_URL =
         "postgresql://postgres:postgres@127.0.0.1:5432/fliprouter_test_lazy";
 
       const dbFirst = getDb();
@@ -543,14 +544,14 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
     } finally {
       await closeDb();
       if (prevNodeEnv === undefined) {
-        delete process.env.NODE_ENV;
+        delete mutableEnv.NODE_ENV;
       } else {
-        process.env.NODE_ENV = prevNodeEnv;
+        mutableEnv.NODE_ENV = prevNodeEnv;
       }
       if (prevDbUrl === undefined) {
-        delete process.env.DATABASE_URL;
+        delete mutableEnv.DATABASE_URL;
       } else {
-        process.env.DATABASE_URL = prevDbUrl;
+        mutableEnv.DATABASE_URL = prevDbUrl;
       }
     }
 
