@@ -41,11 +41,18 @@ export function getDb(): Database {
   }
 
   const { client, db } = createDb(connectionString);
-  if (process.env.NODE_ENV !== "production") {
-    globalForDb.__fliprouterSql = client;
-    globalForDb.__fliprouterDb = db;
-  }
+  globalForDb.__fliprouterSql = client;
+  globalForDb.__fliprouterDb = db;
   return db;
+}
+
+export async function closeDb(): Promise<void> {
+  const client = globalForDb.__fliprouterSql;
+  globalForDb.__fliprouterSql = undefined;
+  globalForDb.__fliprouterDb = undefined;
+  if (client) {
+    await client.end({ timeout: 5 });
+  }
 }
 
 export * from "./schema";

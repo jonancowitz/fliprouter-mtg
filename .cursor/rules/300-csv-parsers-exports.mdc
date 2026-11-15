@@ -7,11 +7,11 @@ alwaysApply: false
 # Scanner CSV Ingestion & Manifest Export Rules
 
 ## 1. Input Scanner Normalization
-Auto-detect scanner source by header signature and normalize to `{ scryfallId, tcgplayerProductId, setCode, collectorNumber, finish, condition, language, isAltered, isMisprint, quantity }`:
+Auto-detect scanner source by header signature and normalize to `{ scryfallId, tcgplayerProductId, setCode, collectorNumber, finish, condition, language, isAltered, isMisprint, quantity }` (map `'nonfoil'` <-> `'normal'` against `card_catalog.finishes`, and normalize full language strings such as `"English"`, `"Japanese"`, `"Chinese (Simplified)"`, `"Chinese (Traditional)"`, `"Portuguese (Brazil)"` to short ISO codes `en`, `ja`, `de`, `fr`, `it`, `es`, `pt`, `ko`, `ru`, `zhs`, `zht`, `ph` <= 16 chars):
 - **ManaBox:** Read `Scryfall ID` directly. Map `Foil` (`normal`, `foil`, `etched`). Map `Condition` (`near_mint`->`NM`, `lightly_played`->`LP`, `moderately_played`->`MP`, `heavily_played`->`HP`, `damaged`->`DMG`). Map `Language`, `Altered`, and `Misprint`.
-- **Delver Lens:** Read `Scryfall ID`. Normalize `Foil` boolean/string (`Foil`/`true`->`foil`, `Etched`->`etched`, empty/`false`->`normal`).
-- **TCGplayer App:** Match `Product ID` against `card_catalog.tcgplayer_id` (or `tcgplayer_etched_id` when `Printing` contains `Etched`). Fallback to `(LOWER(Set Code), Card Number)`.
-- **Dragon Shield:** Detect headers (`Folder Name, Quantity, Trade Quantity, Card Name, Set Code, Set Name, Card Number, Condition, Printing, Language, ...`). Normalize Dragon Shield set codes and collector numbers, resolve via `(LOWER(set_code), collector_number)`, map `Printing` (`Normal`->`normal`, `Foil`->`foil`, `Etched`/`Foil Etched`->`etched`), `Condition`, and `Language` (`English`->`en`).
+- **Delver Lens:** Read `Scryfall ID`. Normalize `Foil` boolean/string (`Foil`/`true`->`foil`, `Etched`->`etched`, empty/`false`->`normal`) and optional `Language`.
+- **TCGplayer App:** Match `Product ID` against `card_catalog.tcgplayer_id` (or `tcgplayer_etched_id` when `Printing` contains `Etched`). Fallback to `(LOWER(Set Code), Card Number)`. Normalize `Language` to ISO code.
+- **Dragon Shield:** Detect headers (`Folder Name, Quantity, Trade Quantity, Card Name, Set Code, Set Name, Card Number, Condition, Printing, Language, ...`). Normalize Dragon Shield set codes and collector numbers, resolve via `(LOWER(set_code), collector_number)`, map `Printing` (`Normal`->`normal`, `Foil`->`foil`, `Etched`/`Foil Etched`->`etched`), `Condition`, and `Language` (`English`->`en`, etc.).
 
 ## 2. Output Manifest Rules
 - **Card Conduit Export (`PILE_1_BUYLIST`):** Columns `Quantity, Name, Set Code, Collector Number, Finish, Condition, Scryfall ID`. Validate `>= 90%` of quantity has `P_buy >= 0.50` for Curated; for Sorted, enforce `100%` `P_buy >= 0.50` and split shipments exceeding `500` total cards into numbered batch CSVs (`<= 500` cards each).

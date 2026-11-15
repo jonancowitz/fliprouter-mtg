@@ -1,17 +1,55 @@
+import fs from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { and, eq, gt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { closeDb, getDb } from "../../src/db/index";
 import * as schema from "../../src/db/schema";
 import {
   cardCatalog,
   collectionLots,
+  fromCatalogFinish,
   lotItems,
+  RECOMMENDED_CHANNELS,
   skuPriceCache,
+  toCatalogFinish,
   userRoutingProfiles,
 } from "../../src/db/schema";
+
+function loadPythonSqlConstant(constantName: string): string {
+  const pySource = fs.readFileSync(
+    path.resolve(__dirname, "../../scripts/sync_catalog.py"),
+    "utf8",
+  );
+  const pattern = new RegExp(
+    `^${constantName}\\s*=\\s*"""([\\s\\S]*?)"""`,
+    "m",
+  );
+  const match = pattern.exec(pySource);
+  if (!match?.[1]) {
+    throw new Error(`Missing SQL constant ${constantName} in sync_catalog.py`);
+  }
+  return match[1].trim();
+}
+
+function bindNamedSql(
+  namedSql: string,
+  params: Record<string, unknown>,
+): { query: string; values: unknown[] } {
+  const values: unknown[] = [];
+
+  const query = namedSql.replace(/%\(([a-zA-Z0-9_]+)\)s/g, (_full, key: string) => {
+    if (!(key in params)) {
+      throw new Error(`Missing SQL bind parameter: ${key}`);
+    }
+    values.push(params[key]);
+    return `$${values.length}`;
+  });
+
+  return { query, values };
+}
 
 describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
   let client: PGlite;
@@ -277,106 +315,200 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
     expect(itemsAfter).toHaveLength(0);
   });
 
-  it("executes Python sync_catalog.py SQL upsert, etched price, Mana Pool supplement, and cache prune queries", async () => {
+  it("executes exact Python sync_catalog.py SQL constants across Night-1 and Night-2 refreshes", async () => {
+    const upsertScryfallSql = loadPythonSqlConstant("UPSERT_SCRYFALL_SQL");
+    const updateIdentifiersSql = loadPythonSqlConstant("UPDATE_IDENTIFIERS_SQL");
+    const resetDailyVendorPricesSql = loadPythonSqlConstant(
+      "RESET_DAILY_VENDOR_PRICES_SQL",
+    );
+    const updatePricesSql = loadPythonSqlConstant("UPDATE_PRICES_BY_MTGJSON_SQL");
+    const supplementManapoolSql = loadPythonSqlConstant(
+      "SUPPLEMENT_MANAPOOL_BY_SCRYFALL_SQL",
+    );
+    const refreshManapoolSql = loadPythonSqlConstant(
+      "REFRESH_MANAPOOL_BY_SCRYFALL_SQL",
+    );
+    const pruneExpiredSkuCacheSql = loadPythonSqlConstant(
+      "PRUNE_EXPIRED_SKU_CACHE_SQL",
+    );
+
     const scryfallId = "0000579f-7b35-4ed3-b44c-db2a538066fe";
     const oracleId = "44623693-51d6-49ad-8cd7-140505caf02f";
     const mtgjsonUuid = "0003caab-9ff5-5d1a-bc06-976dd0457f19";
 
     // Stage 1: Scryfall ON CONFLICT (scryfall_id) DO UPDATE
-    await client.query(
-      `
-      INSERT INTO card_catalog (
-        scryfall_id, oracle_id, tcgplayer_id, tcgplayer_etched_id,
-        cardkingdom_id, cardkingdom_foil_id, name, set_code, set_name,
-        collector_number, rarity, finishes, image_uri,
-        tcg_market_nm, tcg_market_foil, tcg_market_etched, updated_at
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW()
-      )
-      ON CONFLICT (scryfall_id) DO UPDATE SET
-        oracle_id = EXCLUDED.oracle_id,
-        tcgplayer_id = COALESCE(EXCLUDED.tcgplayer_id, card_catalog.tcgplayer_id),
-        name = EXCLUDED.name,
-        set_code = EXCLUDED.set_code,
-        set_name = EXCLUDED.set_name,
-        collector_number = EXCLUDED.collector_number,
-        rarity = EXCLUDED.rarity,
-        finishes = EXCLUDED.finishes,
-        tcg_market_nm = COALESCE(EXCLUDED.tcg_market_nm, card_catalog.tcg_market_nm),
-        updated_at = NOW();
-      `,
-      [
-        scryfallId,
-        oracleId,
-        14200,
-        null,
-        null,
-        null,
-        "Fury Sliver",
-        "tsp",
-        "Time Spiral",
-        "157",
-        "uncommon",
-        ["nonfoil", "foil", "etched"],
-        "https://cards.scryfall.io/normal/fury_sliver.jpg",
-        "0.43",
-        "1.58",
-        "3.10",
-      ],
-    );
+    const stage1 = bindNamedSql(upsertScryfallSql, {
+      scryfall_id: scryfallId,
+      oracle_id: oracleId,
+      tcgplayer_id: 14200,
+      tcgplayer_etched_id: null,
+      cardkingdom_id: null,
+      cardkingdom_foil_id: null,
+      name: "Fury Sliver",
+      set_code: "tsp",
+      set_name: "Time Spiral",
+      collector_number: "157",
+      rarity: "uncommon",
+      finishes: ["nonfoil", "foil", "etched"],
+      image_uri: "https://cards.scryfall.io/normal/fury_sliver.jpg",
+      tcg_market_nm: "0.43",
+      tcg_market_foil: "1.58",
+      tcg_market_etched: "3.10",
+    });
+    await client.query(stage1.query, stage1.values);
 
     // Stage 2: MTGJSON AllIdentifiers mapping update
-    await client.query(
-      `
-      UPDATE card_catalog
-      SET
-        mtgjson_uuid = CASE
-          WHEN EXISTS (
-            SELECT 1
-            FROM card_catalog existing
-            WHERE existing.mtgjson_uuid = $1::uuid
-              AND existing.scryfall_id <> $2::uuid
-          ) THEN card_catalog.mtgjson_uuid
-          ELSE $1::uuid
-        END,
-        cardkingdom_id = COALESCE($3, cardkingdom_id),
-        cardkingdom_foil_id = COALESCE($4, cardkingdom_foil_id),
-        updated_at = NOW()
-      WHERE scryfall_id = $2::uuid;
-      `,
-      [mtgjsonUuid, scryfallId, 121001, 121002],
-    );
+    const stage2 = bindNamedSql(updateIdentifiersSql, {
+      scryfall_id: scryfallId,
+      mtgjson_uuid: mtgjsonUuid,
+      tcgplayer_id: null,
+      tcgplayer_etched_id: null,
+      cardkingdom_id: 121001,
+      cardkingdom_foil_id: 121002,
+    });
+    await client.query(stage2.query, stage2.values);
 
-    // Stage 3: MTGJSON AllPricesToday update including etched buylist
-    await client.query(
-      `
-      UPDATE card_catalog
-      SET
-        tcg_market_nm = COALESCE($1, tcg_market_nm),
-        manapool_low_nm = COALESCE($2, manapool_low_nm),
-        ck_buylist_cash_nm = COALESCE($3, ck_buylist_cash_nm),
-        ck_buylist_credit_nm = COALESCE($4, ck_buylist_credit_nm),
-        ck_buylist_cash_etched = COALESCE($5, ck_buylist_cash_etched),
-        ck_buylist_credit_etched = COALESCE($6, ck_buylist_credit_etched),
-        updated_at = NOW()
-      WHERE mtgjson_uuid = $7::uuid;
-      `,
-      ["0.49", "0.38", "0.25", "0.33", "1.50", "1.95", mtgjsonUuid],
-    );
+    // Night 1 — Stage 3: MTGJSON AllPricesToday update including etched buylist
+    await client.query(resetDailyVendorPricesSql);
+    const night1Stage3 = bindNamedSql(updatePricesSql, {
+      mtgjson_uuid: mtgjsonUuid,
+      tcg_market_nm: "0.49",
+      tcg_low_nm: null,
+      tcg_market_foil: null,
+      tcg_low_foil: null,
+      tcg_market_etched: null,
+      tcg_low_etched: null,
+      manapool_low_nm: "0.38",
+      manapool_low_foil: null,
+      manapool_low_etched: null,
+      ck_buylist_cash_nm: "0.25",
+      ck_buylist_credit_nm: "0.33",
+      ck_buylist_cash_foil: null,
+      ck_buylist_credit_foil: null,
+      ck_buylist_cash_etched: "1.50",
+      ck_buylist_credit_etched: "1.95",
+    });
+    await client.query(night1Stage3.query, night1Stage3.values);
 
-    // Stage 4: Mana Pool public singles supplement fills only missing columns
-    await client.query(
-      `
-      UPDATE card_catalog
-      SET
-        manapool_low_nm = COALESCE(card_catalog.manapool_low_nm, $1),
-        manapool_low_foil = COALESCE(card_catalog.manapool_low_foil, $2),
-        manapool_low_etched = COALESCE(card_catalog.manapool_low_etched, $3),
-        updated_at = NOW()
-      WHERE scryfall_id = $4::uuid;
-      `,
-      ["0.99", "1.42", "2.75", scryfallId],
+    // Night 1 — Stage 4: Mana Pool public singles supplement fills only missing columns
+    const night1Stage4 = bindNamedSql(supplementManapoolSql, {
+      scryfall_id: scryfallId,
+      tcgplayer_id: 14200,
+      manapool_low_nm: "0.99",
+      manapool_low_foil: "1.42",
+      manapool_low_etched: "2.75",
+    });
+    const night1SupplementRes = await client.query(
+      night1Stage4.query,
+      night1Stage4.values,
     );
+    expect(night1SupplementRes.affectedRows).toBe(1);
+
+    // Re-running Stage 4 when no NULL columns remain does zero redundant writes
+    const noopSupplementRes = await client.query(
+      night1Stage4.query,
+      night1Stage4.values,
+    );
+    expect(noopSupplementRes.affectedRows).toBe(0);
+
+    const [afterNight1] = await db
+      .select()
+      .from(cardCatalog)
+      .where(eq(cardCatalog.scryfallId, scryfallId));
+
+    expect(afterNight1).toMatchObject({
+      scryfallId,
+      mtgjsonUuid,
+      cardkingdomId: 121001,
+      cardkingdomFoilId: 121002,
+      tcgMarketNm: "0.49",
+      tcgMarketFoil: "1.58", // Preserved from Stage 1 Scryfall baseline
+      manapoolLowNm: "0.38", // Preserved from MTGJSON rather than overwritten by fallback
+      manapoolLowFoil: "1.42", // Supplemented from Mana Pool singles feed
+      manapoolLowEtched: "2.75", // Supplemented from Mana Pool singles feed
+      ckBuylistCashNm: "0.25",
+      ckBuylistCreditNm: "0.33",
+      ckBuylistCashEtched: "1.50",
+      ckBuylistCreditEtched: "1.95",
+    });
+
+    // Night 2: Card Kingdom drops its buylist offer, MTGJSON updates NM, and Mana Pool updates foil/etched
+    await client.query(resetDailyVendorPricesSql);
+    const night2Stage3 = bindNamedSql(updatePricesSql, {
+      mtgjson_uuid: mtgjsonUuid,
+      tcg_market_nm: "0.52",
+      tcg_low_nm: null,
+      tcg_market_foil: null,
+      tcg_low_foil: null,
+      tcg_market_etched: null,
+      tcg_low_etched: null,
+      manapool_low_nm: "0.41",
+      manapool_low_foil: null,
+      manapool_low_etched: null,
+      ck_buylist_cash_nm: null,
+      ck_buylist_credit_nm: null,
+      ck_buylist_cash_foil: null,
+      ck_buylist_credit_foil: null,
+      ck_buylist_cash_etched: null,
+      ck_buylist_credit_etched: null,
+    });
+    await client.query(night2Stage3.query, night2Stage3.values);
+
+    const night2Stage4 = bindNamedSql(supplementManapoolSql, {
+      scryfall_id: scryfallId,
+      tcgplayer_id: 14200,
+      manapool_low_nm: "0.95",
+      manapool_low_foil: "1.19",
+      manapool_low_etched: null,
+    });
+    const night2SupplementRes = await client.query(
+      night2Stage4.query,
+      night2Stage4.values,
+    );
+    expect(night2SupplementRes.affectedRows).toBe(1);
+
+    // Non-etched card with NULL incoming etched price performs 0 writes on repeat check
+    const night2RepeatRes = await client.query(
+      night2Stage4.query,
+      night2Stage4.values,
+    );
+    expect(night2RepeatRes.affectedRows).toBe(0);
+
+    const [afterNight2] = await db
+      .select()
+      .from(cardCatalog)
+      .where(eq(cardCatalog.scryfallId, scryfallId));
+
+    expect(afterNight2).toMatchObject({
+      tcgMarketNm: "0.52",
+      manapoolLowNm: "0.41",
+      manapoolLowFoil: "1.19", // Refreshed on Night 2 instead of frozen at Night 1's 1.42
+      manapoolLowEtched: null, // Cleared when out of NM stock
+      ckBuylistCashNm: null, // Dropped CK buylist offer cleared instead of lingering
+      ckBuylistCreditNm: null,
+      ckBuylistCashEtched: null,
+      ckBuylistCreditEtched: null,
+    });
+
+    // Standalone `--skip-prices` Stage 4 (`REFRESH_MANAPOOL_BY_SCRYFALL_SQL`) overwrites Mana Pool directly
+    const standaloneRefresh = bindNamedSql(refreshManapoolSql, {
+      scryfall_id: scryfallId,
+      tcgplayer_id: 14200,
+      manapool_low_nm: "0.39",
+      manapool_low_foil: "1.15",
+      manapool_low_etched: "2.60",
+    });
+    await client.query(standaloneRefresh.query, standaloneRefresh.values);
+
+    const [afterStandalone] = await db
+      .select()
+      .from(cardCatalog)
+      .where(eq(cardCatalog.scryfallId, scryfallId));
+    expect(afterStandalone).toMatchObject({
+      manapoolLowNm: "0.39",
+      manapoolLowFoil: "1.15",
+      manapoolLowEtched: "2.60",
+    });
 
     // Stage 5: Expired sku_price_cache pruning
     await db.insert(skuPriceCache).values({
@@ -387,32 +519,48 @@ describe("FlipRouter MTG PostgreSQL Drizzle Schema", () => {
       source: "justtcg",
       expiresAt: new Date(Date.now() - 60_000),
     });
-    await client.query(`DELETE FROM sku_price_cache WHERE expires_at <= NOW();`);
+    await client.query(pruneExpiredSkuCacheSql);
 
     const remainingCache = await db
       .select()
       .from(skuPriceCache)
       .where(eq(skuPriceCache.scryfallId, scryfallId));
     expect(remainingCache).toHaveLength(0);
+  });
 
-    const [synced] = await db
-      .select()
-      .from(cardCatalog)
-      .where(eq(cardCatalog.scryfallId, scryfallId));
+  it("caches getDb() singleton in NODE_ENV=production and exposes Step 3 finish/channel helpers", async () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevDbUrl = process.env.DATABASE_URL;
+    try {
+      await closeDb();
+      process.env.NODE_ENV = "production";
+      process.env.DATABASE_URL =
+        "postgresql://postgres:postgres@127.0.0.1:5432/fliprouter_test_lazy";
 
-    expect(synced).toMatchObject({
-      scryfallId,
-      mtgjsonUuid,
-      cardkingdomId: 121001,
-      cardkingdomFoilId: 121002,
-      tcgMarketNm: "0.49",
-      manapoolLowNm: "0.38", // Preserved from MTGJSON rather than overwritten by fallback
-      manapoolLowFoil: "1.42", // Supplemented from Mana Pool singles feed
-      manapoolLowEtched: "2.75", // Supplemented from Mana Pool singles feed
-      ckBuylistCashNm: "0.25",
-      ckBuylistCreditNm: "0.33",
-      ckBuylistCashEtched: "1.50",
-      ckBuylistCreditEtched: "1.95",
-    });
+      const dbFirst = getDb();
+      const dbSecond = getDb();
+      expect(dbSecond).toBe(dbFirst);
+    } finally {
+      await closeDb();
+      if (prevNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = prevNodeEnv;
+      }
+      if (prevDbUrl === undefined) {
+        delete process.env.DATABASE_URL;
+      } else {
+        process.env.DATABASE_URL = prevDbUrl;
+      }
+    }
+
+    expect(toCatalogFinish("normal")).toBe("nonfoil");
+    expect(toCatalogFinish("foil")).toBe("foil");
+    expect(toCatalogFinish("etched")).toBe("etched");
+    expect(fromCatalogFinish("nonfoil")).toBe("normal");
+    expect(fromCatalogFinish("Foil Etched")).toBe("etched");
+    expect(fromCatalogFinish("Foil")).toBe("foil");
+    expect(RECOMMENDED_CHANNELS).toContain("conduit_standard");
+    expect(RECOMMENDED_CHANNELS).toContain("tcgplayer_single");
   });
 });
