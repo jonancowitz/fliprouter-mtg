@@ -15,6 +15,7 @@ import type {
 } from "@/lib/csv";
 import type {
   BucketSummaryMetrics,
+  BuylistCashSelectionMode,
   BuylistVendor,
   CatalogPriceFields,
   PaidSkuApiSkipReason,
@@ -47,6 +48,7 @@ export interface SerializedRoutingCardInput {
   finishListedInCatalog?: boolean;
   skuPriceCache: SerializedSkuCacheFields | null;
   conduitBuylistCashUsd?: string | null;
+  lockedAllocatedCostBasisUsd?: string | null;
 }
 
 export interface UnresolvedRowSummary {
@@ -121,6 +123,8 @@ export interface TriageIngestResponse {
   diagnostics: TriageDiagnostics;
   inputs: SerializedRoutingCardInput[];
   profile: SerializedRoutingProfile;
+  buylistCashMode: BuylistCashSelectionMode;
+  evaluatedAt: string;
   summary: SerializedRoutedSummary;
 }
 
@@ -145,6 +149,8 @@ export interface SavedLotDetailResponse {
   lot: SavedLotListItem;
   inputs: SerializedRoutingCardInput[];
   profile: SerializedRoutingProfile;
+  buylistCashMode: BuylistCashSelectionMode;
+  evaluatedAt: string;
   summary: SerializedRoutedSummary;
 }
 
@@ -198,6 +204,7 @@ export function hydrateRoutingCardInputs(
     isMisprint: item.isMisprint,
     skuPriceCache: hydrateSkuCache(item.skuPriceCache),
     conduitBuylistCashUsd: item.conduitBuylistCashUsd ?? null,
+    lockedAllocatedCostBasisUsd: item.lockedAllocatedCostBasisUsd ?? null,
   }));
 }
 
@@ -216,9 +223,11 @@ export function serializeRoutingProfile(
     conduitTierPreference: profile.conduitTierPreference,
     monthlySkuApiQuota: profile.monthlySkuApiQuota,
     monthlySkuApiUsed: profile.monthlySkuApiUsed,
-    skuApiQuotaResetAt: profile.skuApiQuotaResetAt
-      ? profile.skuApiQuotaResetAt.toISOString()
-      : undefined,
+    skuApiQuotaResetAt:
+      profile.skuApiQuotaResetAt &&
+      !Number.isNaN(profile.skuApiQuotaResetAt.getTime())
+        ? profile.skuApiQuotaResetAt.toISOString()
+        : undefined,
   };
 }
 
@@ -227,12 +236,20 @@ export function hydrateRoutingProfile(
 ): Partial<RoutingProfileConfig> {
   if (!serialized) return {};
   const { skuApiQuotaResetAt, ...rest } = serialized;
+  const parsedReset = skuApiQuotaResetAt
+    ? new Date(skuApiQuotaResetAt)
+    : undefined;
   return {
     ...rest,
-    ...(skuApiQuotaResetAt
-      ? { skuApiQuotaResetAt: new Date(skuApiQuotaResetAt) }
+    ...(parsedReset && !Number.isNaN(parsedReset.getTime())
+      ? { skuApiQuotaResetAt: parsedReset }
       : {}),
   };
 }
 
-export type { AssignedBucket, CollectionLotStatus, RecommendedChannel };
+export type {
+  AssignedBucket,
+  BuylistCashSelectionMode,
+  CollectionLotStatus,
+  RecommendedChannel,
+};

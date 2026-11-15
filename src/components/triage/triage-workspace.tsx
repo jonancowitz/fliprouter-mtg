@@ -21,6 +21,7 @@ import {
 import {
   type BuylistCashSelectionMode,
   DEFAULT_ROUTING_PROFILE,
+  divRoundHalfUp,
   formatCentsToUsd,
   parseUsdToCents,
   routeCollectionLot,
@@ -53,6 +54,8 @@ export interface TriageWorkspaceInitialState {
   initialPresetId: string;
   initialLotName: string;
   initialPurchaseCostUsd: string;
+  initialEvaluatedAt: string;
+  initialBuylistCashMode: BuylistCashSelectionMode;
   initialDiagnostics: TriageDiagnostics;
   initialInputs: SerializedRoutingCardInput[];
   initialProfile: SerializedRoutingProfile;
@@ -85,7 +88,10 @@ export function TriageWorkspace({
     initial.initialProfile,
   );
   const [buylistCashMode, setBuylistCashMode] =
-    useState<BuylistCashSelectionMode>("best");
+    useState<BuylistCashSelectionMode>(initial.initialBuylistCashMode);
+  const [evaluatedAtIso, setEvaluatedAtIso] = useState<string>(
+    initial.initialEvaluatedAt,
+  );
 
   const [savedLots, setSavedLots] = useState<SavedLotListItem[]>(
     initial.initialSavedLots,
@@ -108,6 +114,11 @@ export function TriageWorkspace({
     [serializedInputs],
   );
 
+  const evaluationDate = useMemo(() => {
+    const parsed = new Date(evaluatedAtIso);
+    return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  }, [evaluatedAtIso]);
+
   // Sanitize purchaseCostInput safely for live `bigint` recalculation
   const safePurchaseCostUsd = useMemo(() => {
     try {
@@ -126,16 +137,36 @@ export function TriageWorkspace({
       purchaseCostUsd: safePurchaseCostUsd,
       items: hydratedCardInputs,
       profile: hydratedProf,
-      options: { buylistCashMode },
+      options: { buylistCashMode, now: evaluationDate },
     });
-  }, [safePurchaseCostUsd, hydratedCardInputs, profile, buylistCashMode]);
+  }, [
+    safePurchaseCostUsd,
+    hydratedCardInputs,
+    profile,
+    buylistCashMode,
+    evaluationDate,
+  ]);
 
   const computedLaborPerOrderUsd = useMemo(() => {
     const rateCents = parseUsdToCents(profile.hourlyLaborRateUsd) ?? 2000n;
     const secs = BigInt(Math.max(0, profile.secondsPerSingleOrder));
-    const laborCents = (secs * rateCents * 2n + 3600n) / 7200n;
+    const laborCents = divRoundHalfUp(secs * rateCents, 3600n);
     return formatCentsToUsd(laborCents);
   }, [profile.hourlyLaborRateUsd, profile.secondsPerSingleOrder]);
+
+  const buyPctOfFmvDisplay = useMemo(() => {
+    if (routed.summary.estimatedGrossValueCents <= 0n) {
+      return "0%";
+    }
+    const pct = divRoundHalfUp(
+      routed.summary.purchaseCostCents * 100n,
+      routed.summary.estimatedGrossValueCents,
+    );
+    return `${pct.toString()}%`;
+  }, [
+    routed.summary.purchaseCostCents,
+    routed.summary.estimatedGrossValueCents,
+  ]);
 
   const isCogsReconciled =
     routed.summary.estimatedGrossValueCents === 0n ||
@@ -183,6 +214,7 @@ export function TriageWorkspace({
             csvText: params.csvText,
             purchaseCostUsd: targetCost,
             profile,
+            buylistCashMode,
           }),
         });
         const payload = (await res.json()) as
@@ -196,6 +228,7 @@ export function TriageWorkspace({
 
         setSerializedInputs(payload.inputs);
         setDiagnostics(payload.diagnostics);
+        setEvaluatedAtIso(payload.evaluatedAt);
         setActivePresetId(params.presetId ?? null);
         setActiveLotId(null);
         setActiveLotStatus("triaged");
@@ -214,7 +247,7 @@ export function TriageWorkspace({
         setIsIngesting(false);
       }
     },
-    [profile, safePurchaseCostUsd],
+    [buylistCashMode, profile, safePurchaseCostUsd],
   );
 
   const handleSelectPreset = useCallback(
@@ -256,6 +289,8 @@ export function TriageWorkspace({
             lotName: lotName.trim() || "Untitled Acquisition Lot",
             purchaseCostUsd: safePurchaseCostUsd,
             profile,
+            buylistCashMode,
+            persistProfile: false,
             rerouteItems: true,
           }),
         });
@@ -263,9 +298,13 @@ export function TriageWorkspace({
           | SavedLotDetailResponse
           | { error: string };
         if (!res.ok || "error" in data) {
-          throw new Error("error" in data ? data.error : "Failed to update lot.");
+          throw new Error(
+            "error" in data ? data.error : "Failed to update lot.",
+          );
         }
         setActiveLotStatus(data.lot.status);
+        setSerializedInputs(data.inputs);
+        setEvaluatedAtIso(data.evaluatedAt);
         setLotSaveBanner(`Updated "${data.lot.lotName}"`);
       } else {
         const res = await fetch("/api/lots", {
@@ -277,7 +316,8 @@ export function TriageWorkspace({
             status: "triaged",
             inputs: serializedInputs,
             profile,
-            persistProfile: true,
+            buylistCashMode,
+            persistProfile: false,
           }),
         });
         const data = (await res.json()) as
@@ -288,6 +328,8 @@ export function TriageWorkspace({
         }
         setActiveLotId(data.lot.lotId);
         setActiveLotStatus(data.lot.status);
+        setSerializedInputs(data.inputs);
+        setEvaluatedAtIso(data.evaluatedAt);
         setLotSaveBanner(`Saved "${data.lot.lotName}"`);
       }
       await refreshSavedLots();
@@ -301,6 +343,7 @@ export function TriageWorkspace({
     }
   }, [
     activeLotId,
+    buylistCashMode,
     lotName,
     profile,
     refreshSavedLots,
@@ -314,10 +357,9 @@ export function TriageWorkspace({
       | SavedLotDetailResponse
       | { error: string };
     if (!res.ok || "error" in data) {
-      setIngestError(
-        "error" in data ? data.error : "Failed to load saved lot.",
-      );
-      return;
+      const msg = "error" in data ? data.error : "Failed to load saved lot.";
+      setIngestError(msg);
+      throw new Error(msg);
     }
     setActiveLotId(data.lot.lotId);
     setActiveLotStatus(data.lot.status);
@@ -326,7 +368,10 @@ export function TriageWorkspace({
     setPurchaseCostInput(data.lot.purchaseCostUsd);
     setSerializedInputs(data.inputs);
     setProfile(data.profile);
+    setBuylistCashMode(data.buylistCashMode);
+    setEvaluatedAtIso(data.evaluatedAt);
     setDiagnostics(null);
+    setIngestError(null);
     setActiveBucketFilter("ALL");
   }, []);
 
@@ -343,12 +388,19 @@ export function TriageWorkspace({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
       });
-      if (res.ok) {
-        if (targetLotId === activeLotId) {
-          setActiveLotStatus(patch.status);
-        }
-        await refreshSavedLots();
+      const payload = (await res.json()) as
+        | SavedLotDetailResponse
+        | { error?: string };
+      if (!res.ok || "error" in payload) {
+        throw new Error(
+          ("error" in payload && payload.error) ||
+            "Failed to update lot settlement.",
+        );
       }
+      if (targetLotId === activeLotId) {
+        setActiveLotStatus(patch.status);
+      }
+      await refreshSavedLots();
     },
     [activeLotId, refreshSavedLots],
   );
@@ -358,28 +410,45 @@ export function TriageWorkspace({
       const res = await fetch(`/api/lots/${targetLotId}`, {
         method: "DELETE",
       });
-      if (res.ok) {
-        if (activeLotId === targetLotId) {
-          setActiveLotId(null);
-        }
-        await refreshSavedLots();
+      const payload = (await res.json()) as {
+        deleted?: boolean;
+        error?: string;
+      };
+      if (!res.ok || payload.error) {
+        throw new Error(payload.error ?? "Failed to delete lot.");
       }
+      if (activeLotId === targetLotId) {
+        setActiveLotId(null);
+      }
+      await refreshSavedLots();
     },
     [activeLotId, refreshSavedLots],
   );
 
   const handleSaveProfileDefault = useCallback(async () => {
     setIsSavingProfile(true);
+    setIngestError(null);
     try {
       const res = await fetch("/api/profile", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(profile),
       });
-      if (res.ok) {
-        setLotSaveBanner("Saved default flipper profile");
-        window.setTimeout(() => setLotSaveBanner(null), 2200);
+      const payload = (await res.json()) as {
+        profile?: SerializedRoutingProfile;
+        error?: string;
+      };
+      if (!res.ok || payload.error) {
+        throw new Error(payload.error ?? "Failed to save default profile.");
       }
+      setLotSaveBanner("Saved default flipper profile");
+      window.setTimeout(() => setLotSaveBanner(null), 2200);
+    } catch (err) {
+      setIngestError(
+        err instanceof Error
+          ? err.message
+          : "Failed to save default flipper profile.",
+      );
     } finally {
       setIsSavingProfile(false);
     }
@@ -573,8 +642,8 @@ export function TriageWorkspace({
                     {formatUsdDisplay(routed.summary.estimatedGrossValueUsd)}
                   </div>
                   <div className="mt-0.5 font-mono text-[11px] text-slate-400">
-                    {routed.summary.totalCards} cards ({routed.summary.totalLineItems}{" "}
-                    SKUs)
+                    {routed.summary.totalCards} cards (
+                    {routed.summary.totalLineItems} SKUs)
                   </div>
                 </div>
               </div>
@@ -640,14 +709,7 @@ export function TriageWorkspace({
                       : "—"}
                   </div>
                   <div className="mt-0.5 font-mono text-[11px] text-slate-400">
-                    Buy @{" "}
-                    {routed.summary.estimatedGrossValueCents > 0n
-                      ? `${Number(
-                          (routed.summary.purchaseCostCents * 100n) /
-                            routed.summary.estimatedGrossValueCents,
-                        )}%`
-                      : "0%"}{" "}
-                    of FMV
+                    Buy @ {buyPctOfFmvDisplay} of FMV
                   </div>
                 </div>
               </div>
@@ -684,6 +746,9 @@ export function TriageWorkspace({
             <PilesTable
               items={routed.items}
               summary={routed.summary}
+              outboundBuylistBoxShippingUsd={
+                profile.outboundBuylistBoxShippingUsd
+              }
               activeBucketFilter={activeBucketFilter}
               onChangeBucketFilter={setActiveBucketFilter}
             />

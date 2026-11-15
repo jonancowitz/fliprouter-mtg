@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
-import { type CollectionLotStatus, getReadyDb } from "@/db";
+import { getReadyDb } from "@/db";
 import { CsvParseError } from "@/lib/csv";
 import {
   createPersistedLot,
   listPersistedLots,
-  type SerializedRoutingCardInput,
-  type SerializedRoutingProfile,
+  parseJsonObjectBody,
   TriageValidationError,
 } from "@/lib/triage";
 
@@ -17,38 +16,29 @@ export async function GET(): Promise<NextResponse> {
     const lots = await listPersistedLots(db);
     return NextResponse.json({ lots });
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Failed to fetch saved lots.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[fliprouter:api/lots GET]", err);
+    return NextResponse.json(
+      { error: "Failed to fetch saved lots." },
+      { status: 500 },
+    );
   }
-}
-
-interface CreateLotBody {
-  lotName?: string;
-  purchaseCostUsd?: string;
-  purchaseDate?: string;
-  status?: CollectionLotStatus;
-  actualRealizedPayoutUsd?: string | null;
-  csvText?: string;
-  inputs?: SerializedRoutingCardInput[];
-  profile?: Partial<SerializedRoutingProfile>;
-  persistProfile?: boolean;
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    const body = (await request.json()) as CreateLotBody;
+    const body = await parseJsonObjectBody(request);
     const { db } = await getReadyDb();
 
     const created = await createPersistedLot(db, {
-      lotName: body.lotName ?? "",
-      purchaseCostUsd: body.purchaseCostUsd ?? "0.00",
+      lotName: body.lotName,
+      purchaseCostUsd: body.purchaseCostUsd,
       purchaseDate: body.purchaseDate,
       status: body.status,
       actualRealizedPayoutUsd: body.actualRealizedPayoutUsd,
       csvText: body.csvText,
       inputs: body.inputs,
-      profile: body.profile,
+      profile: body.profile as Record<string, unknown> | undefined,
+      buylistCashMode: body.buylistCashMode,
       persistProfile: body.persistProfile,
     });
 
@@ -64,8 +54,10 @@ export async function POST(request: Request): Promise<NextResponse> {
         err instanceof TriageValidationError ? err.statusCode : 400;
       return NextResponse.json({ error: err.message }, { status });
     }
-    const message =
-      err instanceof Error ? err.message : "Failed to save collection lot.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[fliprouter:api/lots POST]", err);
+    return NextResponse.json(
+      { error: "Failed to save collection lot." },
+      { status: 500 },
+    );
   }
 }

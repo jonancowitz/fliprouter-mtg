@@ -1,7 +1,7 @@
 import { gt, sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { getReadyDb, skuPriceCache } from "@/db";
-import { getCatalogCount, seedDemoCatalog } from "@/db/seed-demo";
+import { getReadyDb, seedReadyDbCatalog, skuPriceCache } from "@/db";
+import { getCatalogCount } from "@/db/seed-demo";
 import {
   getOrCreateUserRoutingProfile,
   serializeRoutingProfile,
@@ -29,16 +29,17 @@ export async function GET(): Promise<NextResponse> {
       profile: serializeRoutingProfile(profile),
     });
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Failed to inspect catalog status.";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    console.error("[fliprouter:api/catalog/status GET]", err);
+    return NextResponse.json(
+      { ok: false, error: "Failed to inspect catalog status." },
+      { status: 500 },
+    );
   }
 }
 
 export async function POST(): Promise<NextResponse> {
   try {
-    const { db, mode } = await getReadyDb({ autoSeed: false });
-    const seedResult = await seedDemoCatalog(db);
+    const { db, mode, seedResult } = await seedReadyDbCatalog();
     const catalogCount = await getCatalogCount(db);
     return NextResponse.json({
       ok: true,
@@ -47,8 +48,10 @@ export async function POST(): Promise<NextResponse> {
       ...seedResult,
     });
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Failed to seed demo catalog.";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+    console.error("[fliprouter:api/catalog/status POST]", err);
+    return NextResponse.json(
+      { ok: false, error: "Failed to seed demo catalog." },
+      { status: 500 },
+    );
   }
 }

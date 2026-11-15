@@ -1,31 +1,25 @@
 import { NextResponse } from "next/server";
 import { getReadyDb } from "@/db";
-import { CsvParseError, type ScannerFormat } from "@/lib/csv";
+import { CsvParseError } from "@/lib/csv";
 import {
   ingestAndRouteScannerCsv,
-  type SerializedRoutingProfile,
+  parseJsonObjectBody,
   TriageValidationError,
 } from "@/lib/triage";
 
 export const dynamic = "force-dynamic";
 
-interface TriagePostBody {
-  csvText?: string;
-  format?: ScannerFormat;
-  purchaseCostUsd?: string;
-  profile?: Partial<SerializedRoutingProfile>;
-}
-
 export async function POST(request: Request): Promise<NextResponse> {
   try {
-    const body = (await request.json()) as TriagePostBody;
+    const body = await parseJsonObjectBody(request);
     const { db } = await getReadyDb();
 
     const response = await ingestAndRouteScannerCsv(db, {
-      csvText: body.csvText ?? "",
+      csvText: body.csvText,
       format: body.format,
       purchaseCostUsd: body.purchaseCostUsd,
-      profile: body.profile,
+      profile: body.profile as Record<string, unknown> | undefined,
+      buylistCashMode: body.buylistCashMode,
     });
 
     return NextResponse.json(response);
@@ -40,8 +34,10 @@ export async function POST(request: Request): Promise<NextResponse> {
         err instanceof TriageValidationError ? err.statusCode : 400;
       return NextResponse.json({ error: err.message }, { status });
     }
-    const message =
-      err instanceof Error ? err.message : "Failed to ingest scanner CSV.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[fliprouter:api/triage POST]", err);
+    return NextResponse.json(
+      { error: "Failed to ingest scanner CSV." },
+      { status: 500 },
+    );
   }
 }

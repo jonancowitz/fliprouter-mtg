@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { type CollectionLotStatus, getReadyDb } from "@/db";
+import { getReadyDb } from "@/db";
 import {
   deletePersistedLot,
   getPersistedLotById,
-  type SerializedRoutingProfile,
+  parseJsonObjectBody,
   TriageValidationError,
   updatePersistedLot,
 } from "@/lib/triage";
@@ -30,19 +30,12 @@ export async function GET(
         { status: err.statusCode },
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Failed to fetch lot details.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[fliprouter:api/lots/[lotId] GET]", err);
+    return NextResponse.json(
+      { error: "Failed to fetch lot details." },
+      { status: 500 },
+    );
   }
-}
-
-interface PatchLotBody {
-  lotName?: string;
-  purchaseCostUsd?: string;
-  status?: CollectionLotStatus;
-  actualRealizedPayoutUsd?: string | null;
-  profile?: Partial<SerializedRoutingProfile>;
-  rerouteItems?: boolean;
 }
 
 export async function PATCH(
@@ -51,7 +44,7 @@ export async function PATCH(
 ): Promise<NextResponse> {
   try {
     const { lotId } = await context.params;
-    const body = (await request.json()) as PatchLotBody;
+    const body = await parseJsonObjectBody(request);
     const { db } = await getReadyDb();
 
     const updated = await updatePersistedLot(db, lotId, {
@@ -59,7 +52,9 @@ export async function PATCH(
       purchaseCostUsd: body.purchaseCostUsd,
       status: body.status,
       actualRealizedPayoutUsd: body.actualRealizedPayoutUsd,
-      profile: body.profile,
+      profile: body.profile as Record<string, unknown> | undefined,
+      buylistCashMode: body.buylistCashMode,
+      persistProfile: body.persistProfile,
       rerouteItems: body.rerouteItems,
     });
 
@@ -74,9 +69,11 @@ export async function PATCH(
         err instanceof TriageValidationError ? err.statusCode : 400;
       return NextResponse.json({ error: err.message }, { status });
     }
-    const message =
-      err instanceof Error ? err.message : "Failed to update lot.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[fliprouter:api/lots/[lotId] PATCH]", err);
+    return NextResponse.json(
+      { error: "Failed to update lot." },
+      { status: 500 },
+    );
   }
 }
 
@@ -96,8 +93,10 @@ export async function DELETE(
         { status: err.statusCode },
       );
     }
-    const message =
-      err instanceof Error ? err.message : "Failed to delete lot.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[fliprouter:api/lots/[lotId] DELETE]", err);
+    return NextResponse.json(
+      { error: "Failed to delete lot." },
+      { status: 500 },
+    );
   }
 }

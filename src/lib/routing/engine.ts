@@ -8,6 +8,7 @@ import type {
 } from "@/db/schema";
 import {
   addRational,
+  type AllocatedItemCostBasis,
   allocateScheduleCCostBasis,
   coalescePositiveUsdToCents,
   divRoundHalfUp,
@@ -272,23 +273,6 @@ export function evaluatePaidSkuApiEligibility(
     };
   }
 
-  const quotaResetElapsed =
-    profile.skuApiQuotaResetAt !== undefined &&
-    profile.skuApiQuotaResetAt.getTime() <= now.getTime();
-  const effectiveQuotaUsed = quotaResetElapsed ? 0 : profile.monthlySkuApiUsed;
-
-  if (
-    profile.monthlySkuApiQuota <= 0 ||
-    effectiveQuotaUsed >= profile.monthlySkuApiQuota
-  ) {
-    return {
-      eligible: false,
-      nmBaselineCents,
-      nmBaselineUsd,
-      skipReason: "quota_exhausted",
-    };
-  }
-
   if (condition === "NM") {
     if (options.includeHighValueNm === false) {
       return {
@@ -306,21 +290,33 @@ export function evaluatePaidSkuApiEligibility(
         skipReason: "below_nm_price_threshold",
       };
     }
-    return {
-      eligible: true,
-      nmBaselineCents,
-      nmBaselineUsd,
-    };
+  } else {
+    const minNonNmBaselineCents =
+      options.minNonNmBaselineCents ?? PAID_SKU_API_NON_NM_MIN_NM_CENTS;
+    if (nmBaselineCents < minNonNmBaselineCents) {
+      return {
+        eligible: false,
+        nmBaselineCents,
+        nmBaselineUsd,
+        skipReason: "below_nm_price_threshold",
+      };
+    }
   }
 
-  const minNonNmBaselineCents =
-    options.minNonNmBaselineCents ?? PAID_SKU_API_NON_NM_MIN_NM_CENTS;
-  if (nmBaselineCents < minNonNmBaselineCents) {
+  const quotaResetElapsed =
+    profile.skuApiQuotaResetAt !== undefined &&
+    profile.skuApiQuotaResetAt.getTime() <= now.getTime();
+  const effectiveQuotaUsed = quotaResetElapsed ? 0 : profile.monthlySkuApiUsed;
+
+  if (
+    profile.monthlySkuApiQuota <= 0 ||
+    effectiveQuotaUsed >= profile.monthlySkuApiQuota
+  ) {
     return {
       eligible: false,
       nmBaselineCents,
       nmBaselineUsd,
-      skipReason: "below_nm_price_threshold",
+      skipReason: "quota_exhausted",
     };
   }
 
@@ -1112,6 +1108,62 @@ function createEmptyBucketMetrics(bucket: AssignedBucket): BucketSummaryMetrics 
   };
 }
 
+function resolveLotCostBasisAllocations(
+  purchaseCostCents: bigint,
+  sourceItems: readonly RoutingCardInput[],
+  evaluatedItems: readonly EvaluatedCardRouting[],
+): AllocatedItemCostBasis[] {
+  if (sourceItems.length > 0 && sourceItems.length === evaluatedItems.length) {
+    const lockedCentsList: bigint[] = [];
+    let lockedSum = 0n;
+    let allValidLocked = true;
+
+    for (const item of sourceItems) {
+      if (
+        item.lockedAllocatedCostBasisUsd === null ||
+        item.lockedAllocatedCostBasisUsd === undefined
+      ) {
+        allValidLocked = false;
+        break;
+      }
+      let parsed: bigint | null = null;
+      try {
+        parsed = parseUsdToCents(item.lockedAllocatedCostBasisUsd);
+      } catch {
+        parsed = null;
+      }
+      if (parsed === null || parsed < 0n) {
+        allValidLocked = false;
+        break;
+      }
+      lockedCentsList.push(parsed);
+      lockedSum += parsed;
+    }
+
+    if (allValidLocked && lockedSum === purchaseCostCents) {
+      return evaluatedItems.map((ev, idx) => {
+        const rowTotalCents = lockedCentsList[idx]!;
+        const unitBasisCents =
+          rowTotalCents > 0n
+            ? divRoundHalfUp(rowTotalCents, BigInt(ev.quantity))
+            : 0n;
+        return {
+          unitCostBasisCents: unitBasisCents,
+          totalCostBasisCents: rowTotalCents,
+        };
+      });
+    }
+  }
+
+  return allocateScheduleCCostBasis(
+    purchaseCostCents,
+    evaluatedItems.map((ev) => ({
+      quantity: ev.quantity,
+      unitFmvCents: ev.baselines.initialFmvCents,
+    })),
+  );
+}
+
 /**
  * Routes an entire acquisition lot (`SPEC.md` §4.C–4.D):
  * 1. Evaluates each card line item deterministically.
@@ -1158,12 +1210,10 @@ export function routeCollectionLot(
   const baseAllowCkCredit = profile.enableCreditArbitrage;
   const baseAllowConduit = buylistCashMode !== "ck_direct";
 
-  const costBasisAllocations = allocateScheduleCCostBasis(
+  const costBasisAllocations = resolveLotCostBasisAllocations(
     purchaseCostCents,
-    evaluatedItems.map((ev) => ({
-      quantity: ev.quantity,
-      unitFmvCents: ev.baselines.initialFmvCents,
-    })),
+    lotInput.items,
+    evaluatedItems,
   );
 
   // Group initial unconstrained buylist assignments by outbound vendor (`card_kingdom` vs `card_conduit`)

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getReadyDb } from "@/db";
 import {
   getOrCreateUserRoutingProfile,
-  type SerializedRoutingProfile,
+  parseJsonObjectBody,
   serializeRoutingProfile,
   TriageValidationError,
   upsertUserRoutingProfile,
@@ -16,15 +16,17 @@ export async function GET(): Promise<NextResponse> {
     const profile = await getOrCreateUserRoutingProfile(db);
     return NextResponse.json({ profile: serializeRoutingProfile(profile) });
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Failed to load routing profile.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[fliprouter:api/profile GET]", err);
+    return NextResponse.json(
+      { error: "Failed to load routing profile." },
+      { status: 500 },
+    );
   }
 }
 
 export async function PATCH(request: Request): Promise<NextResponse> {
   try {
-    const body = (await request.json()) as Partial<SerializedRoutingProfile>;
+    const body = await parseJsonObjectBody(request);
     const { db } = await getReadyDb();
     const updated = await upsertUserRoutingProfile(db, body);
     return NextResponse.json({ profile: serializeRoutingProfile(updated) });
@@ -38,8 +40,10 @@ export async function PATCH(request: Request): Promise<NextResponse> {
         err instanceof TriageValidationError ? err.statusCode : 400;
       return NextResponse.json({ error: err.message }, { status });
     }
-    const message =
-      err instanceof Error ? err.message : "Failed to update routing profile.";
-    return NextResponse.json({ error: message }, { status: 500 });
+    console.error("[fliprouter:api/profile PATCH]", err);
+    return NextResponse.json(
+      { error: "Failed to update routing profile." },
+      { status: 500 },
+    );
   }
 }

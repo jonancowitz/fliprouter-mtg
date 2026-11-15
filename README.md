@@ -19,7 +19,7 @@ npm run dev
 ### TypeScript, Build, & Drizzle ORM Database Layer
 
 ```bash
-npm run db:seed     # Re-seed local PGlite or PostgreSQL demo catalog
+npm run db:seed     # Seed/refresh demo catalog (auto-delegates to POST /api/catalog/status if npm run dev is active on :3000)
 npm run typecheck   # Strict TypeScript check
 npm test            # Vitest unit + PGlite integration suite
 npm run build       # Next.js App Router production build

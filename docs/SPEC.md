@@ -112,7 +112,7 @@ CREATE TABLE collection_lots (
     purchase_date DATE NOT NULL DEFAULT CURRENT_DATE,
     purchase_cost_usd NUMERIC(10, 2) NOT NULL,
     total_cards INTEGER NOT NULL DEFAULT 0,
-    status VARCHAR(16) NOT NULL DEFAULT 'draft', -- 'draft' | 'routed' | 'shipped' | 'settled'
+    status VARCHAR(32) NOT NULL DEFAULT 'draft', -- 'draft' | 'routed' | 'triaged' | 'exported' | 'shipped' | 'partially_settled' | 'settled'
     estimated_gross_value_usd NUMERIC(10, 2),
     estimated_net_payout_usd NUMERIC(10, 2),
     actual_realized_payout_usd NUMERIC(10, 2),
@@ -237,7 +237,7 @@ Let $\text{Net}_{\text{BestSingle}} = \max(\text{Net}_{\text{TCG}}, \text{Net}_{
 * **IRS Schedule C Proportional FMV Cost Basis (`allocated_cost_basis_usd`):**
   * Given lot acquisition cost $C_{\text{lot}} = \text{purchase\_cost\_usd}$ and each line item's initial condition-adjusted unit retail Fair Market Value $V_i$ with quantity $q_i$ (letting $V_{\text{total}} = \sum_j q_j V_j$), `lot_items.allocated_cost_basis_usd` stores the **line-item** allocated cost basis:
     $$\text{allocated\_cost\_basis\_usd}_i = \begin{cases} C_{\text{lot}} \times \dfrac{q_i V_i}{V_{\text{total}}} & \text{if } V_{\text{total}} > 0 \\ 0.00 & \text{otherwise} \end{cases}$$
-    reconciled in exact integer cents via Largest-Remainder (Hamilton) allocation so $\sum_i \text{allocated\_cost\_basis\_usd}_i = \text{purchase\_cost\_usd}$ across every `quantity >= 1` lot whenever $V_{\text{total}} > 0$ (exposing per-copy $\text{round}(\text{allocated\_cost\_basis\_usd}_i / q_i)$ for unit display and splitting partial-row sales across tax periods as $\text{round}(\text{allocated\_cost\_basis\_usd}_i \times q_{\text{sold}} / q_i)$ with the exact cent remainder retained on the unsold copies), alongside lot-level `status` (`draft | routed | shipped | settled`) and `actual_realized_payout_usd`.
+    reconciled in exact integer cents via Largest-Remainder (Hamilton) allocation so $\sum_i \text{allocated\_cost\_basis\_usd}_i = \text{purchase\_cost\_usd}$ across every `quantity >= 1` lot whenever $V_{\text{total}} > 0$ (exposing per-copy $\text{round}(\text{allocated\_cost\_basis\_usd}_i / q_i)$ for unit display, locking persisted acquisition-date `allocated_cost_basis_usd` across subsequent slider/profile reloads unless `purchase_cost_usd` changes, and splitting partial-row sales across tax periods as $\text{round}(\text{allocated\_cost\_basis\_usd}_i \times q_{\text{sold}} / q_i)$ with the exact cent remainder retained on the unsold copies), alongside lot-level `status` (`draft | routed | triaged | exported | shipped | partially_settled | settled`) and `actual_realized_payout_usd`.
 
 ---
 

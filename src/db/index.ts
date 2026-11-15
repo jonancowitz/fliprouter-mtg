@@ -6,6 +6,7 @@ import { migrate as migratePglite } from "drizzle-orm/pglite/migrator";
 import { drizzle, type PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres, { type Sql } from "postgres";
 import * as schema from "./schema";
+import type { SeedDemoResult } from "./seed-demo";
 
 export type Database = PostgresJsDatabase<typeof schema>;
 export type DbRuntimeMode = "postgres" | "pglite";
@@ -26,7 +27,9 @@ const globalForDb = globalThis as unknown as {
   __fliprouterPglite?: PGlite;
   __fliprouterDb?: Database;
   __fliprouterDbMode?: DbRuntimeMode;
-  __fliprouterInitPromise?: Promise<ReadyDbContext>;
+  __fliprouterMigratePromise?: Promise<{ db: Database; mode: DbRuntimeMode }>;
+  __fliprouterSeedPromise?: Promise<number>;
+  __fliprouterClosePromise?: Promise<void>;
 };
 
 export function resolvePgliteDataDir(): string {
@@ -79,7 +82,10 @@ export function getDbMode(): DbRuntimeMode {
  */
 export function getDb(): Database {
   const desiredMode = getDbMode();
-  if (globalForDb.__fliprouterDb && globalForDb.__fliprouterDbMode === desiredMode) {
+  if (
+    globalForDb.__fliprouterDb &&
+    globalForDb.__fliprouterDbMode === desiredMode
+  ) {
     return globalForDb.__fliprouterDb;
   }
 
@@ -99,17 +105,15 @@ export function getDb(): Database {
   return db;
 }
 
-/**
- * Ensures the active database is migrated and (when empty in local prototype mode
- * or when `autoSeed` is enabled) seeded with the demo MTG catalog + SKU cache.
- * Concurrent callers share a single initialization promise.
- */
-export async function getReadyDb(options: {
-  autoSeed?: boolean;
-} = {}): Promise<ReadyDbContext> {
-  const desiredMode = getDbMode();
+async function ensureMigratedDb(): Promise<{
+  db: Database;
+  mode: DbRuntimeMode;
+}> {
+  if (globalForDb.__fliprouterClosePromise) {
+    await globalForDb.__fliprouterClosePromise;
+  }
 
-  // Reset cached init promise if env switched between postgres and pglite (e.g. in tests)
+  const desiredMode = getDbMode();
   if (
     globalForDb.__fliprouterDbMode &&
     globalForDb.__fliprouterDbMode !== desiredMode
@@ -117,12 +121,10 @@ export async function getReadyDb(options: {
     await closeDb();
   }
 
-  if (!globalForDb.__fliprouterInitPromise) {
-    globalForDb.__fliprouterInitPromise = (async () => {
+  if (!globalForDb.__fliprouterMigratePromise) {
+    globalForDb.__fliprouterMigratePromise = (async () => {
       const db = getDb();
       const mode = getDbMode();
-      let seededCount = 0;
-
       if (mode === "pglite") {
         await migratePglite(
           db as unknown as ReturnType<typeof drizzlePglite<typeof schema>>,
@@ -131,42 +133,131 @@ export async function getReadyDb(options: {
           },
         );
       }
-
-      const shouldAutoSeed =
-        options.autoSeed ??
-        (mode === "pglite" && process.env.FLIPROUTER_AUTO_SEED !== "false");
-
-      if (shouldAutoSeed) {
-        const { seedDemoCatalogIfEmpty } = await import("./seed-demo");
-        const result = await seedDemoCatalogIfEmpty(db);
-        seededCount = result.insertedCatalogCount;
-      }
-
-      return { db, mode, seededCount };
+      return { db, mode };
     })().catch((err) => {
-      globalForDb.__fliprouterInitPromise = undefined;
+      globalForDb.__fliprouterMigratePromise = undefined;
       throw err;
     });
   }
 
-  return globalForDb.__fliprouterInitPromise;
+  return globalForDb.__fliprouterMigratePromise;
+}
+
+/**
+ * Ensures the active database is migrated and (when empty in local prototype mode
+ * or when `FLIPROUTER_AUTO_SEED=true` / `options.autoSeed=true`) seeded with the
+ * demo MTG catalog + SKU cache. Migration and seeding promises are tracked
+ * independently so `getReadyDb({ autoSeed: false })` never poisons subsequent
+ * `getReadyDb()` auto-seeding.
+ */
+export async function getReadyDb(
+  options: {
+    autoSeed?: boolean;
+  } = {},
+): Promise<ReadyDbContext> {
+  const { db, mode } = await ensureMigratedDb();
+
+  const shouldAutoSeed =
+    options.autoSeed ??
+    (process.env.FLIPROUTER_AUTO_SEED === "true" ||
+      (mode === "pglite" && process.env.FLIPROUTER_AUTO_SEED !== "false"));
+
+  if (!shouldAutoSeed) {
+    if (globalForDb.__fliprouterSeedPromise) {
+      const seededCount = await globalForDb.__fliprouterSeedPromise;
+      return { db, mode, seededCount };
+    }
+    return { db, mode, seededCount: 0 };
+  }
+
+  if (!globalForDb.__fliprouterSeedPromise) {
+    globalForDb.__fliprouterSeedPromise = (async () => {
+      const { seedDemoCatalogIfEmpty } = await import("./seed-demo");
+      const result = await seedDemoCatalogIfEmpty(db);
+      return result.insertedCatalogCount;
+    })().catch((err) => {
+      globalForDb.__fliprouterSeedPromise = undefined;
+      throw err;
+    });
+  }
+
+  const seededCount = await globalForDb.__fliprouterSeedPromise;
+  return { db, mode, seededCount };
+}
+
+/**
+ * Runs an explicit transactional demo seed coordinated with `getReadyDb()` so
+ * concurrent callers wait for seeding to complete before querying the catalog.
+ */
+export async function seedReadyDbCatalog(
+  options: { now?: Date } = {},
+): Promise<{
+  db: Database;
+  mode: DbRuntimeMode;
+  seedResult: SeedDemoResult;
+}> {
+  const { db, mode } = await ensureMigratedDb();
+  const priorSeed = globalForDb.__fliprouterSeedPromise;
+
+  let capturedResult: SeedDemoResult | undefined;
+  const nextSeedPromise = (async () => {
+    if (priorSeed) {
+      await priorSeed.catch(() => 0);
+    }
+    const { seedDemoCatalog } = await import("./seed-demo");
+    capturedResult = await seedDemoCatalog(db, options);
+    return capturedResult.insertedCatalogCount;
+  })();
+
+  globalForDb.__fliprouterSeedPromise = nextSeedPromise.catch((err) => {
+    globalForDb.__fliprouterSeedPromise = undefined;
+    throw err;
+  });
+
+  await globalForDb.__fliprouterSeedPromise;
+  return {
+    db,
+    mode,
+    seedResult: capturedResult!,
+  };
 }
 
 export async function closeDb(): Promise<void> {
-  const sqlClient = globalForDb.__fliprouterSql;
-  const pgliteClient = globalForDb.__fliprouterPglite;
-  globalForDb.__fliprouterSql = undefined;
-  globalForDb.__fliprouterPglite = undefined;
-  globalForDb.__fliprouterDb = undefined;
-  globalForDb.__fliprouterDbMode = undefined;
-  globalForDb.__fliprouterInitPromise = undefined;
+  if (globalForDb.__fliprouterClosePromise) {
+    return globalForDb.__fliprouterClosePromise;
+  }
 
-  if (sqlClient) {
-    await sqlClient.end({ timeout: 5 });
-  }
-  if (pgliteClient) {
-    await pgliteClient.close();
-  }
+  globalForDb.__fliprouterClosePromise = (async () => {
+    const sqlClient = globalForDb.__fliprouterSql;
+    const pgliteClient = globalForDb.__fliprouterPglite;
+    const inflightMigrate = globalForDb.__fliprouterMigratePromise;
+    const inflightSeed = globalForDb.__fliprouterSeedPromise;
+
+    if (inflightMigrate) {
+      await inflightMigrate.catch(() => undefined);
+    }
+    if (inflightSeed) {
+      await inflightSeed.catch(() => undefined);
+    }
+
+    globalForDb.__fliprouterSql = undefined;
+    globalForDb.__fliprouterPglite = undefined;
+    globalForDb.__fliprouterDb = undefined;
+    globalForDb.__fliprouterDbMode = undefined;
+    globalForDb.__fliprouterMigratePromise = undefined;
+    globalForDb.__fliprouterSeedPromise = undefined;
+
+    if (sqlClient) {
+      await sqlClient.end({ timeout: 5 });
+    }
+    if (pgliteClient) {
+      await pgliteClient.close();
+    }
+  })().finally(() => {
+    globalForDb.__fliprouterClosePromise = undefined;
+  });
+
+  return globalForDb.__fliprouterClosePromise;
 }
 
 export * from "./schema";

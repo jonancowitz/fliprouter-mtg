@@ -20,7 +20,7 @@ export const DEMO_SCANNER_PRESETS: readonly DemoScannerPreset[] = [
     formatLabel: "ManaBox",
     title: "Weekend Backpack Buy (Full 4-Pile Showcase)",
     subtitle:
-      "36 rows / 82 cards: $850 Cradle ($75 TCG fee cap), LP Volcanic Island (24h SKU cache), Credit Arb candidates, Quarantines & Bulk.",
+      "36 rows / 81 cards: $850 Cradle ($75 TCG fee cap), LP Volcanic Island (24h SKU cache), Credit Arb candidates, Quarantines & Bulk.",
     filename: "manabox-weekend-collection-buy.csv",
     suggestedLotName: "GP Hartford Backpack Binder Buy (62% Market)",
     suggestedPurchaseCostUsd: "1850.00",
@@ -124,7 +124,7 @@ export const DEMO_SCANNER_PRESETS: readonly DemoScannerPreset[] = [
     formatLabel: "Delver Lens",
     title: "Small Binder ($12 Box Postage Demotion Demo)",
     subtitle:
-      "Small 10-card scan where 2 buylist cards cannot clear the $12.00 outbound box shipping hurdle and auto-demote!",
+      "Small 10-card scan where 4 buylist cards (3 SKUs) cannot clear the $12.00 outbound box shipping hurdle and auto-demote!",
     filename: "delver-lens-small-binder-postage-guard.csv",
     suggestedLotName: "Local FNM Walk-Up Mini Binder",
     suggestedPurchaseCostUsd: "92.00",

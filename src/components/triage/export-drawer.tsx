@@ -13,6 +13,8 @@ import {
 import { useMemo, useState } from "react";
 import type { ConduitTierPreference } from "@/db/schema";
 import {
+  type CardConduitBatchFile,
+  type CardConduitExportResult,
   type CardKingdomExportMode,
   exportCardKingdomBuylistCsv,
   exportP2pClaimMarkdown,
@@ -37,6 +39,48 @@ type ActivePreviewTab =
   | "tcgplayer"
   | "manapool";
 
+export interface ConduitDrawerViewState {
+  readonly safeBatchIdx: number;
+  readonly activeBatch: CardConduitBatchFile | undefined;
+  readonly previewFilename: string;
+  readonly previewContent: string;
+  readonly downloadDisabled: boolean;
+  readonly primaryDownloadFiles: ReadonlyArray<{
+    readonly filename: string;
+    readonly csv: string;
+  }>;
+}
+
+export function resolveConduitDrawerView(
+  conduitExport: CardConduitExportResult,
+  requestedBatchIdx: number,
+): ConduitDrawerViewState {
+  const safeBatchIdx = Math.min(
+    Math.max(0, requestedBatchIdx),
+    Math.max(0, conduitExport.batches.length - 1),
+  );
+  const activeBatch = conduitExport.batches[safeBatchIdx];
+  const downloadDisabled =
+    conduitExport.totalCards === 0 || !conduitExport.validation.valid;
+
+  const primaryDownloadFiles = downloadDisabled
+    ? []
+    : conduitExport.batches.map((batch) => ({
+        filename: batch.filename,
+        csv: batch.csv,
+      }));
+
+  return {
+    safeBatchIdx,
+    activeBatch,
+    previewFilename:
+      activeBatch?.filename ?? `card-conduit-${conduitExport.tier}.csv`,
+    previewContent: activeBatch?.csv ?? conduitExport.csv,
+    downloadDisabled,
+    primaryDownloadFiles,
+  };
+}
+
 export function ExportDrawer({
   open,
   onClose,
@@ -49,6 +93,7 @@ export function ExportDrawer({
   );
   const [ckMode, setCkMode] = useState<CardKingdomExportMode>("all");
   const [p2pIncludeAllSingles, setP2pIncludeAllSingles] = useState(false);
+  const [conduitBatchIdx, setConduitBatchIdx] = useState(0);
   const [activePreview, setActivePreview] =
     useState<ActivePreviewTab>("p2p_markdown");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -82,6 +127,19 @@ export function ExportDrawer({
 
   if (!open) return null;
 
+  const conduitView = resolveConduitDrawerView(
+    bundle.cardConduit,
+    conduitBatchIdx,
+  );
+  const safeConduitBatchIdx = conduitView.safeBatchIdx;
+  const conduitDownloadDisabled = conduitView.downloadDisabled;
+
+  const handleDownloadConduitPrimary = () => {
+    for (const file of conduitView.primaryDownloadFiles) {
+      triggerBrowserDownload(file.filename, file.csv);
+    }
+  };
+
   const copyText = async (key: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -100,7 +158,7 @@ export function ExportDrawer({
       : activePreview === "card_kingdom"
         ? ckExport.csv
         : activePreview === "card_conduit"
-          ? bundle.cardConduit.csv
+          ? conduitView.previewContent
           : activePreview === "tcgplayer"
             ? bundle.tcgplayerStaged.csv
             : bundle.manapoolStaged.csv;
@@ -111,11 +169,16 @@ export function ExportDrawer({
       : activePreview === "card_kingdom"
         ? ckExport.filename
         : activePreview === "card_conduit"
-          ? bundle.cardConduit.batches[0]?.filename ??
-            `card-conduit-${conduitTier}.csv`
+          ? conduitView.previewFilename
           : activePreview === "tcgplayer"
             ? bundle.tcgplayerStaged.filename
             : bundle.manapoolStaged.filename;
+
+  const previewDownloadDisabled =
+    (activePreview === "card_conduit" && conduitDownloadDisabled) ||
+    (activePreview === "card_kingdom" && ckExport.totalCards === 0) ||
+    (activePreview === "tcgplayer" && bundle.tcgplayerStaged.totalCards === 0) ||
+    (activePreview === "manapool" && bundle.manapoolStaged.totalCards === 0);
 
   return (
     <div
@@ -181,7 +244,7 @@ export function ExportDrawer({
                       </>
                     ) : (
                       <>
-                        <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
                         <span className="text-amber-300">
                           {bundle.cardConduit.validation.errorMessage}
                         </span>
@@ -199,36 +262,65 @@ export function ExportDrawer({
                   </button>
                   <button
                     type="button"
-                    disabled={bundle.cardConduit.totalCards === 0}
-                    onClick={() =>
-                      triggerBrowserDownload(
-                        bundle.cardConduit.batches[0]?.filename ??
-                          `card-conduit-${conduitTier}.csv`,
-                        bundle.cardConduit.csv,
-                      )
+                    disabled={conduitDownloadDisabled}
+                    onClick={handleDownloadConduitPrimary}
+                    title={
+                      !bundle.cardConduit.validation.valid
+                        ? bundle.cardConduit.validation.errorMessage
+                        : bundle.cardConduit.batches.length > 1
+                          ? `Download all ${bundle.cardConduit.batches.length} split <=500-card batch CSVs`
+                          : "Download Card Conduit CSV"
                     }
                     className="inline-flex items-center gap-1 rounded-md bg-teal-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-teal-500 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <Download className="h-3.5 w-3.5" />
-                    CSV
+                    {bundle.cardConduit.batches.length > 1
+                      ? `All (${bundle.cardConduit.batches.length})`
+                      : "CSV"}
                   </button>
                 </div>
               </div>
               {bundle.cardConduit.batches.length > 1 && (
                 <div className="mt-2.5 flex flex-wrap gap-1.5 border-t border-slate-800 pt-2">
-                  {bundle.cardConduit.batches.map((batch) => (
-                    <button
-                      key={batch.batchNumber}
-                      type="button"
-                      onClick={() =>
-                        triggerBrowserDownload(batch.filename, batch.csv)
-                      }
-                      className="inline-flex items-center gap-1 rounded border border-teal-500/30 bg-teal-500/10 px-2 py-0.5 text-[11px] text-teal-200 hover:bg-teal-500/20"
-                    >
-                      <Download className="h-3 w-3" />
-                      Batch #{batch.batchNumber} ({batch.totalCards} cards)
-                    </button>
-                  ))}
+                  {bundle.cardConduit.batches.map((batch, idx) => {
+                    const isFocused =
+                      activePreview === "card_conduit" &&
+                      safeConduitBatchIdx === idx;
+                    return (
+                      <div
+                        key={batch.batchNumber}
+                        className={cn(
+                          "inline-flex items-center overflow-hidden rounded border text-[11px]",
+                          isFocused
+                            ? "border-teal-400 bg-teal-500/20 text-teal-100"
+                            : "border-teal-500/30 bg-teal-500/10 text-teal-200",
+                        )}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActivePreview("card_conduit");
+                            setConduitBatchIdx(idx);
+                          }}
+                          className="px-2 py-0.5 hover:bg-teal-500/20"
+                        >
+                          Batch #{batch.batchNumber} ({batch.totalCards} cards)
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!bundle.cardConduit.validation.valid}
+                          onClick={() =>
+                            triggerBrowserDownload(batch.filename, batch.csv)
+                          }
+                          className="border-l border-teal-500/30 px-1.5 py-0.5 hover:bg-teal-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+                          title={`Download ${batch.filename}`}
+                          aria-label={`Download ${batch.filename}`}
+                        >
+                          <Download className="h-3 w-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -515,17 +607,41 @@ export function ExportDrawer({
 
           {/* Right column: Live Manifest / Claim Post Preview */}
           <div className="flex flex-col rounded-xl border border-slate-800 bg-slate-950 lg:col-span-6">
-            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2.5">
-              <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 px-4 py-2.5">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-xs font-medium text-slate-200">
                   {previewFilename}
                 </span>
+                {activePreview === "card_conduit" &&
+                  bundle.cardConduit.batches.length > 1 && (
+                    <div className="flex items-center gap-1">
+                      {bundle.cardConduit.batches.map((batch, idx) => (
+                        <button
+                          key={batch.batchNumber}
+                          type="button"
+                          onClick={() => setConduitBatchIdx(idx)}
+                          className={cn(
+                            "rounded px-1.5 py-0.5 font-mono text-[10px]",
+                            safeConduitBatchIdx === idx
+                              ? "bg-teal-500/20 text-teal-200 border border-teal-500/40"
+                              : "bg-slate-900 text-slate-400 hover:text-slate-200",
+                          )}
+                        >
+                          #{batch.batchNumber} ({batch.totalCards})
+                        </button>
+                      ))}
+                    </div>
+                  )}
               </div>
               <div className="flex items-center gap-2">
                 <button
                   type="button"
+                  disabled={
+                    activePreview === "card_conduit" &&
+                    !bundle.cardConduit.validation.valid
+                  }
                   onClick={() => copyText("preview", previewContent)}
-                  className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800"
+                  className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-900 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {copiedKey === "preview" ? (
                     <>
@@ -541,6 +657,7 @@ export function ExportDrawer({
                 </button>
                 <button
                   type="button"
+                  disabled={previewDownloadDisabled}
                   onClick={() =>
                     triggerBrowserDownload(
                       previewFilename,
@@ -550,13 +667,24 @@ export function ExportDrawer({
                         : "text/csv;charset=utf-8",
                     )
                   }
-                  className="inline-flex items-center gap-1 rounded bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-100 hover:bg-slate-700"
+                  className="inline-flex items-center gap-1 rounded bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-100 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Download className="h-3.5 w-3.5" />
                   Download
                 </button>
               </div>
             </div>
+            {activePreview === "card_conduit" &&
+              !bundle.cardConduit.validation.valid && (
+                <div className="flex items-center gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-200">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+                  <span>
+                    Export blocked: {bundle.cardConduit.validation.errorMessage}{" "}
+                    Switch Card Conduit tier to Standard or remove sub-$0.50
+                    cards.
+                  </span>
+                </div>
+              )}
             <pre className="max-h-[470px] flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed text-slate-300">
               {previewContent}
             </pre>

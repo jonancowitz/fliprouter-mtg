@@ -28,6 +28,8 @@ export default async function HomePage(): Promise<React.ReactElement> {
     initialPresetId: defaultPreset.id,
     initialLotName: defaultPreset.suggestedLotName,
     initialPurchaseCostUsd: defaultPreset.suggestedPurchaseCostUsd,
+    initialEvaluatedAt: initialTriage.evaluatedAt,
+    initialBuylistCashMode: initialTriage.buylistCashMode,
     initialDiagnostics: initialTriage.diagnostics,
     initialInputs: initialTriage.inputs,
     initialProfile: initialTriage.profile,

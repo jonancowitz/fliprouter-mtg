@@ -8,10 +8,14 @@ import {
   Truck,
   Zap,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { ConduitTierPreference } from "@/db/schema";
 import {
   type BuylistCashSelectionMode,
   DEFAULT_ROUTING_PROFILE,
+  divRoundHalfUp,
+  formatCentsToUsd,
+  parseUsdToCents,
 } from "@/lib/routing";
 import type { SerializedRoutingProfile } from "@/lib/triage/types";
 import { cn } from "@/lib/utils";
@@ -28,13 +32,28 @@ interface RoutingProfileControlsProps {
   onSaveProfileDefault: () => Promise<void>;
 }
 
-function parseSliderNumber(val: string, fallback: number): number {
-  const num = Number.parseFloat(val);
-  return Number.isFinite(num) ? num : fallback;
+function parseCentsClamped(
+  usd: string,
+  fallbackCents: bigint,
+  minCents: bigint,
+  maxCents: bigint,
+): number {
+  try {
+    const parsed = parseUsdToCents(usd);
+    const cents = parsed === null ? fallbackCents : parsed;
+    if (cents < minCents) return Number(minCents);
+    if (cents > maxCents) return Number(maxCents);
+    return Number(cents);
+  } catch {
+    return Number(fallbackCents);
+  }
 }
 
-function formatSliderUsd(num: number): string {
-  return num.toFixed(2);
+function formatSecondsAsMinutesTenths(seconds: number): string {
+  const tenths = divRoundHalfUp(BigInt(Math.max(0, seconds)) * 10n, 60n);
+  const whole = tenths / 10n;
+  const frac = tenths % 10n;
+  return `${whole.toString()}.${frac.toString()}`;
 }
 
 export function RoutingProfileControls({
@@ -47,18 +66,94 @@ export function RoutingProfileControls({
   onResetDefaults,
   onSaveProfileDefault,
 }: RoutingProfileControlsProps): React.ReactElement {
-  const hourlyRateNum = parseSliderNumber(profile.hourlyLaborRateUsd, 20);
-  const minGainNum = parseSliderNumber(
+  const hourlyRateCents = parseCentsClamped(
+    profile.hourlyLaborRateUsd,
+    2000n,
+    0n,
+    6000n,
+  );
+  const minGainCents = parseCentsClamped(
     profile.minSingleNetGainOverBuylistUsd,
-    1.25,
+    125n,
+    0n,
+    500n,
   );
-  const boxShippingNum = parseSliderNumber(
+  const boxShippingCents = parseCentsClamped(
     profile.outboundBuylistBoxShippingUsd,
-    12,
+    1200n,
+    0n,
+    2500n,
   );
-  const pweNum = parseSliderNumber(profile.pweShippingCostUsd, 0.9);
-  const trackedNum = parseSliderNumber(profile.trackedShippingCostUsd, 4.25);
-  const thresholdNum = parseSliderNumber(profile.trackedThresholdUsd, 25);
+
+  // Local draft strings for text/decimal postage inputs so Backspace / partial decimals never snap mid-edit
+  const [pweDraft, setPweDraft] = useState(profile.pweShippingCostUsd);
+  const [trackedDraft, setTrackedDraft] = useState(
+    profile.trackedShippingCostUsd,
+  );
+  const [thresholdDraft, setThresholdDraft] = useState(
+    profile.trackedThresholdUsd,
+  );
+
+  useEffect(() => {
+    setPweDraft(profile.pweShippingCostUsd);
+  }, [profile.pweShippingCostUsd]);
+
+  useEffect(() => {
+    setTrackedDraft(profile.trackedShippingCostUsd);
+  }, [profile.trackedShippingCostUsd]);
+
+  useEffect(() => {
+    setThresholdDraft(profile.trackedThresholdUsd);
+  }, [profile.trackedThresholdUsd]);
+
+  const commitPostageField = (
+    raw: string,
+    fallbackUsd: string,
+    maxCents: bigint,
+    field:
+      | "pweShippingCostUsd"
+      | "trackedShippingCostUsd"
+      | "trackedThresholdUsd",
+    setDraft: (next: string) => void,
+  ) => {
+    try {
+      const parsed = parseUsdToCents(raw);
+      if (parsed === null || parsed < 0n) {
+        setDraft(fallbackUsd);
+        onChangeProfile({ [field]: fallbackUsd });
+        return;
+      }
+      const clamped = parsed > maxCents ? maxCents : parsed;
+      const formatted = formatCentsToUsd(clamped);
+      setDraft(formatted);
+      onChangeProfile({ [field]: formatted });
+    } catch {
+      setDraft(fallbackUsd);
+      onChangeProfile({ [field]: fallbackUsd });
+    }
+  };
+
+  const handleLivePostageChange = (
+    raw: string,
+    maxCents: bigint,
+    field:
+      | "pweShippingCostUsd"
+      | "trackedShippingCostUsd"
+      | "trackedThresholdUsd",
+    setDraft: (next: string) => void,
+  ) => {
+    setDraft(raw);
+    if (raw.trim() === "") return;
+    try {
+      const parsed = parseUsdToCents(raw);
+      if (parsed !== null && parsed >= 0n) {
+        const clamped = parsed > maxCents ? maxCents : parsed;
+        onChangeProfile({ [field]: formatCentsToUsd(clamped) });
+      }
+    } catch {
+      // Wait for blur or valid numeric continuation
+    }
+  };
 
   return (
     <aside className="flex flex-col gap-4 rounded-2xl border border-slate-800/90 bg-slate-900/75 p-4 shadow-lg">
@@ -156,13 +251,10 @@ export function RoutingProfileControls({
           </span>
         </div>
 
-        {/* Hourly Labor Rate */}
+        {/* Hourly Labor Rate (cents: 0..6000 step 100) */}
         <div>
           <div className="mb-1 flex items-center justify-between text-xs">
-            <label
-              htmlFor="slider-hourly-labor"
-              className="text-slate-400"
-            >
+            <label htmlFor="slider-hourly-labor" className="text-slate-400">
               Hourly Packing Rate
             </label>
             <span className="font-mono font-semibold text-slate-100">
@@ -173,12 +265,12 @@ export function RoutingProfileControls({
             id="slider-hourly-labor"
             type="range"
             min={0}
-            max={60}
-            step={1}
-            value={hourlyRateNum}
+            max={6000}
+            step={100}
+            value={hourlyRateCents}
             onChange={(e) =>
               onChangeProfile({
-                hourlyLaborRateUsd: formatSliderUsd(Number(e.target.value)),
+                hourlyLaborRateUsd: formatCentsToUsd(BigInt(e.target.value)),
               })
             }
             className="fliprouter-slider w-full"
@@ -198,7 +290,7 @@ export function RoutingProfileControls({
             </label>
             <span className="font-mono font-semibold text-slate-100">
               {profile.secondsPerSingleOrder}s (
-              {(profile.secondsPerSingleOrder / 60).toFixed(1)}m)
+              {formatSecondsAsMinutesTenths(profile.secondsPerSingleOrder)}m)
             </span>
           </div>
           <input
@@ -230,7 +322,7 @@ export function RoutingProfileControls({
           <span>Buylist Hurdle &amp; Box Postage</span>
         </div>
 
-        {/* Min Single Net Gain Over Buylist */}
+        {/* Min Single Net Gain Over Buylist (cents: 0..500 step 5) */}
         <div>
           <div className="mb-1 flex items-center justify-between text-xs">
             <label htmlFor="slider-min-gain" className="text-slate-400">
@@ -244,13 +336,13 @@ export function RoutingProfileControls({
             id="slider-min-gain"
             type="range"
             min={0}
-            max={5}
-            step={0.05}
-            value={minGainNum}
+            max={500}
+            step={5}
+            value={minGainCents}
             onChange={(e) =>
               onChangeProfile({
-                minSingleNetGainOverBuylistUsd: formatSliderUsd(
-                  Number(e.target.value),
+                minSingleNetGainOverBuylistUsd: formatCentsToUsd(
+                  BigInt(e.target.value),
                 ),
               })
             }
@@ -263,7 +355,7 @@ export function RoutingProfileControls({
           </div>
         </div>
 
-        {/* Outbound Buylist Box Shipping */}
+        {/* Outbound Buylist Box Shipping (cents: 0..2500 step 50) */}
         <div>
           <div className="mb-1 flex items-center justify-between text-xs">
             <label htmlFor="slider-box-shipping" className="text-slate-400">
@@ -277,13 +369,13 @@ export function RoutingProfileControls({
             id="slider-box-shipping"
             type="range"
             min={0}
-            max={25}
-            step={0.5}
-            value={boxShippingNum}
+            max={2500}
+            step={50}
+            value={boxShippingCents}
             onChange={(e) =>
               onChangeProfile({
-                outboundBuylistBoxShippingUsd: formatSliderUsd(
-                  Number(e.target.value),
+                outboundBuylistBoxShippingUsd: formatCentsToUsd(
+                  BigInt(e.target.value),
                 ),
               })
             }
@@ -379,17 +471,25 @@ export function RoutingProfileControls({
             </label>
             <input
               id="input-pwe-cost"
-              type="number"
-              min={0}
-              max={5}
-              step={0.05}
-              value={pweNum}
+              type="text"
+              inputMode="decimal"
+              value={pweDraft}
               onChange={(e) =>
-                onChangeProfile({
-                  pweShippingCostUsd: formatSliderUsd(
-                    Math.max(0, parseSliderNumber(e.target.value, 0.9)),
-                  ),
-                })
+                handleLivePostageChange(
+                  e.target.value,
+                  5000n,
+                  "pweShippingCostUsd",
+                  setPweDraft,
+                )
+              }
+              onBlur={() =>
+                commitPostageField(
+                  pweDraft,
+                  DEFAULT_ROUTING_PROFILE.pweShippingCostUsd,
+                  5000n,
+                  "pweShippingCostUsd",
+                  setPweDraft,
+                )
               }
               className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 font-mono text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
             />
@@ -404,17 +504,25 @@ export function RoutingProfileControls({
             </label>
             <input
               id="input-tracked-cost"
-              type="number"
-              min={0}
-              max={15}
-              step={0.25}
-              value={trackedNum}
+              type="text"
+              inputMode="decimal"
+              value={trackedDraft}
               onChange={(e) =>
-                onChangeProfile({
-                  trackedShippingCostUsd: formatSliderUsd(
-                    Math.max(0, parseSliderNumber(e.target.value, 4.25)),
-                  ),
-                })
+                handleLivePostageChange(
+                  e.target.value,
+                  10_000n,
+                  "trackedShippingCostUsd",
+                  setTrackedDraft,
+                )
+              }
+              onBlur={() =>
+                commitPostageField(
+                  trackedDraft,
+                  DEFAULT_ROUTING_PROFILE.trackedShippingCostUsd,
+                  10_000n,
+                  "trackedShippingCostUsd",
+                  setTrackedDraft,
+                )
               }
               className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 font-mono text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
             />
@@ -429,23 +537,25 @@ export function RoutingProfileControls({
             </label>
             <input
               id="input-tracked-threshold"
-              type="number"
-              min={5}
-              max={100}
-              step={1}
-              value={thresholdNum}
+              type="text"
+              inputMode="decimal"
+              value={thresholdDraft}
               onChange={(e) =>
-                onChangeProfile({
-                  trackedThresholdUsd: formatSliderUsd(
-                    Math.max(
-                      0,
-                      parseSliderNumber(
-                        e.target.value,
-                        Number(DEFAULT_ROUTING_PROFILE.trackedThresholdUsd),
-                      ),
-                    ),
-                  ),
-                })
+                handleLivePostageChange(
+                  e.target.value,
+                  100_000n,
+                  "trackedThresholdUsd",
+                  setThresholdDraft,
+                )
+              }
+              onBlur={() =>
+                commitPostageField(
+                  thresholdDraft,
+                  DEFAULT_ROUTING_PROFILE.trackedThresholdUsd,
+                  100_000n,
+                  "trackedThresholdUsd",
+                  setThresholdDraft,
+                )
               }
               className="mt-1 w-full rounded-lg border border-slate-800 bg-slate-900 px-2 py-1 font-mono text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
             />

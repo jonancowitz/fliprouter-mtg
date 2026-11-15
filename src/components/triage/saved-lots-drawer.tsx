@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AlertCircle,
   Check,
   FolderOpen,
   Loader2,
@@ -51,11 +52,16 @@ export function SavedLotsDrawer({
     {},
   );
   const [savedNoticeId, setSavedNoticeId] = useState<string | null>(null);
+  const [errorByLotId, setErrorByLotId] = useState<
+    Record<string, string | null>
+  >({});
 
   if (!open) return null;
 
   const handleSaveRow = async (lot: SavedLotListItem) => {
     setBusyLotId(lot.lotId);
+    setErrorByLotId((prev) => ({ ...prev, [lot.lotId]: null }));
+    setSavedNoticeId((prev) => (prev === lot.lotId ? null : prev));
     try {
       const status = draftStatus[lot.lotId] ?? lot.status;
       const rawRealized =
@@ -71,6 +77,10 @@ export function SavedLotsDrawer({
       window.setTimeout(() => {
         setSavedNoticeId((prev) => (prev === lot.lotId ? null : prev));
       }, 1800);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to update lot settlement.";
+      setErrorByLotId((prev) => ({ ...prev, [lot.lotId]: message }));
     } finally {
       setBusyLotId(null);
     }
@@ -128,6 +138,7 @@ export function SavedLotsDrawer({
                 draftRealized[lot.lotId] !== undefined
                   ? draftRealized[lot.lotId]!
                   : (lot.actualRealizedPayoutUsd ?? "");
+              const rowError = errorByLotId[lot.lotId];
 
               return (
                 <div
@@ -171,9 +182,22 @@ export function SavedLotsDrawer({
                         disabled={busyLotId === lot.lotId}
                         onClick={async () => {
                           setBusyLotId(lot.lotId);
+                          setErrorByLotId((prev) => ({
+                            ...prev,
+                            [lot.lotId]: null,
+                          }));
                           try {
                             await onLoadLot(lot.lotId);
                             onClose();
+                          } catch (err) {
+                            const message =
+                              err instanceof Error
+                                ? err.message
+                                : "Failed to load lot.";
+                            setErrorByLotId((prev) => ({
+                              ...prev,
+                              [lot.lotId]: message,
+                            }));
                           } finally {
                             setBusyLotId(null);
                           }
@@ -188,8 +212,21 @@ export function SavedLotsDrawer({
                         disabled={busyLotId === lot.lotId}
                         onClick={async () => {
                           setBusyLotId(lot.lotId);
+                          setErrorByLotId((prev) => ({
+                            ...prev,
+                            [lot.lotId]: null,
+                          }));
                           try {
                             await onDeleteLot(lot.lotId);
+                          } catch (err) {
+                            const message =
+                              err instanceof Error
+                                ? err.message
+                                : "Failed to delete lot.";
+                            setErrorByLotId((prev) => ({
+                              ...prev,
+                              [lot.lotId]: message,
+                            }));
                           } finally {
                             setBusyLotId(null);
                           }
@@ -283,12 +320,16 @@ export function SavedLotsDrawer({
                         placeholder="Realized Payout (USD)"
                         aria-label={`Realized payout for ${lot.lotName}`}
                         value={realizedInput}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          setErrorByLotId((prev) => ({
+                            ...prev,
+                            [lot.lotId]: null,
+                          }));
                           setDraftRealized((prev) => ({
                             ...prev,
                             [lot.lotId]: e.target.value,
-                          }))
-                        }
+                          }));
+                        }}
                         className="w-44 rounded-lg border border-slate-700 bg-slate-900 py-1.5 pl-6 pr-2.5 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500 focus:outline-none"
                       />
                     </div>
@@ -309,6 +350,16 @@ export function SavedLotsDrawer({
                         : "Update Settlement"}
                     </button>
                   </div>
+
+                  {rowError && (
+                    <div
+                      role="alert"
+                      className="mt-2.5 flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 text-xs text-rose-200"
+                    >
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
+                      <span>{rowError}</span>
+                    </div>
+                  )}
                 </div>
               );
             })

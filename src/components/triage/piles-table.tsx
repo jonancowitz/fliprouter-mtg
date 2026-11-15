@@ -41,6 +41,7 @@ type SortField =
 interface PilesTableProps {
   items: readonly RoutedLotItem[];
   summary: RoutedLotSummary;
+  outboundBuylistBoxShippingUsd: string;
   activeBucketFilter: BucketFilter;
   onChangeBucketFilter: (filter: BucketFilter) => void;
 }
@@ -48,12 +49,15 @@ interface PilesTableProps {
 export function PilesTable({
   items,
   summary,
+  outboundBuylistBoxShippingUsd,
   activeBucketFilter,
   onChangeBucketFilter,
 }: PilesTableProps): React.ReactElement {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortField, setSortField] = useState<SortField>("optimalTotalNet");
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+
+  const boxPostageLabel = formatUsdDisplay(outboundBuylistBoxShippingUsd);
 
   const quarantinedCardCount = useMemo(
     () =>
@@ -73,7 +77,9 @@ export function PilesTable({
 
   const filteredAndSorted = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    const filtered = items.filter((item) => {
+    const indexed = items.map((item, sourceIndex) => ({ item, sourceIndex }));
+
+    const filtered = indexed.filter(({ item }) => {
       if (activeBucketFilter === "QUARANTINED") {
         if (!item.baselines.isQuarantined) return false;
       } else if (activeBucketFilter === "DEMOTED") {
@@ -94,7 +100,9 @@ export function PilesTable({
       );
     });
 
-    filtered.sort((a, b) => {
+    filtered.sort((lhs, rhs) => {
+      const a = lhs.item;
+      const b = rhs.item;
       if (sortField === "optimalTotalNet") {
         if (a.totalOptimalNetCents !== b.totalOptimalNetCents) {
           return a.totalOptimalNetCents > b.totalOptimalNetCents ? -1 : 1;
@@ -112,7 +120,9 @@ export function PilesTable({
           return a.allocatedCostBasisCents > b.allocatedCostBasisCents ? -1 : 1;
         }
       }
-      return a.card.name.localeCompare(b.card.name);
+      const byName = a.card.name.localeCompare(b.card.name);
+      if (byName !== 0) return byName;
+      return lhs.sourceIndex - rhs.sourceIndex;
     });
 
     return filtered;
@@ -225,7 +235,8 @@ export function PilesTable({
                       ? "Card Kingdom"
                       : "Card Conduit"}{" "}
                     ({vs.totalCards}c · {formatUsdDisplay(vs.grossBuylistNetUsd)}
-                    ) AUTO-DEMOTED — failed box postage hurdle (saved postage!)
+                    ) AUTO-DEMOTED — failed {boxPostageLabel} box postage hurdle
+                    (saved postage!)
                   </span>
                 </>
               ) : (
@@ -405,11 +416,15 @@ export function PilesTable({
                   </td>
                 </tr>
               ) : (
-                filteredAndSorted.map((item, idx) => {
-                  const rowKey = `${item.scryfallId}-${item.finish}-${item.condition}-${item.language}-${idx}`;
+                filteredAndSorted.map(({ item, sourceIndex }) => {
+                  const rowKey = `${sourceIndex}-${item.scryfallId}-${item.finish}-${item.condition}-${item.language}`;
                   const isExpanded = expandedKey === rowKey;
                   const pileMeta = PILE_METADATA[item.assignedBucket];
                   const isQuarantined = item.baselines.isQuarantined;
+                  const isCascadedBuylist =
+                    item.demotedFromBuylistByPostageGuard &&
+                    (item.assignedBucket === "PILE_1_BUYLIST" ||
+                      item.assignedBucket === "PILE_3_CREDIT_ARB");
 
                   const winChannel = item.recommendedChannel;
 
@@ -494,7 +509,9 @@ export function PilesTable({
                                 {item.demotedFromBuylistByPostageGuard && (
                                   <span className="inline-flex items-center gap-0.5 rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.2 text-[10px] font-medium text-amber-200">
                                     <AlertTriangle className="h-2.5 w-2.5" />
-                                    $12 Box Demoted
+                                    {isCascadedBuylist
+                                      ? "Box Guard Cascaded"
+                                      : `${boxPostageLabel} Box Demoted`}
                                   </span>
                                 )}
                               </div>
@@ -758,14 +775,30 @@ export function PilesTable({
                                     </div>
                                   )}
                                   {item.demotedFromBuylistByPostageGuard && (
-                                    <div className="flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+                                    <div className="flex flex-wrap items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
                                       <span>
-                                        {item.initialAssignedBucket}
+                                        {
+                                          PILE_METADATA[
+                                            item.initialAssignedBucket
+                                          ].pileNumber
+                                        }{" "}
+                                        (
+                                        {formatChannelName(
+                                          item.initialRecommendedChannel,
+                                        )}
+                                        )
                                       </span>
-                                      <ArrowRight className="h-3 w-3" />
+                                      <ArrowRight className="h-3 w-3 shrink-0" />
                                       <span>
-                                        {item.assignedBucket} (Saved $12 box
-                                        postage)
+                                        {
+                                          PILE_METADATA[item.assignedBucket]
+                                            .pileNumber
+                                        }{" "}
+                                        (
+                                        {formatChannelName(
+                                          item.recommendedChannel,
+                                        )}
+                                        ) · Saved {boxPostageLabel} box postage
                                       </span>
                                     </div>
                                   )}
