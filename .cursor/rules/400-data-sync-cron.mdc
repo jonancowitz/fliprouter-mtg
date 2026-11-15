@@ -1,13 +1,14 @@
 ---
-description: Use when building or modifying the nightly Python data sync for Scryfall Bulk Data and MTGJSON AllPricesToday
+description: Use when building or modifying the nightly Python data sync for Scryfall Bulk Data, MTGJSON AllPricesToday, and Mana Pool public singles
 alwaysApply: false
 ---
 
-# Nightly Scryfall & MTGJSON Ingestion Pipeline
+# Nightly Scryfall, MTGJSON & Mana Pool Ingestion Pipeline
 
-- Never load the entire 450MB Scryfall JSON or `AllPricesToday.json` into memory at once; use streaming JSON parsers (`ijson` in Python) or chunked processing.
+- Never load the entire 450MB Scryfall JSON/JSONL or `AllPricesToday.json` into memory at once; use streaming JSON parsers (`ijson` in Python) or chunked processing, and quantize all USD amounts with `decimal.Decimal` (`0.01`, `ROUND_HALF_UP`).
 - Sync order at 04:00 UTC:
-  1. Download Scryfall `default_cards` bulk URI -> upsert identity and baseline prices.
-  2. Map `scryfall_id` to `mtgjson_uuid` via `AllIdentifiers.json.bz2`.
-  3. Stream `AllPricesToday.json.bz2` -> extract `tcgplayer.retail`, `cardkingdom.buylist`, and `manapool.retail` for `normal` and `foil`.
-  4. Bulk upsert into PostgreSQL `card_catalog` in batches of 5,000 rows using `ON CONFLICT (scryfall_id) DO UPDATE`.
+  1. Download Scryfall `default_cards` bulk URI -> upsert identity (`scryfall_id`, `tcgplayer_id`, `tcgplayer_etched_id`, set/collector metadata) and baseline prices (`usd`, `usd_foil`, `usd_etched`).
+  2. Map `scryfall_id` to `mtgjson_uuid` (primary face `side in (None, 'a')`) via `AllIdentifiers.json.bz2`.
+  3. Stream `AllPricesToday.json.bz2` -> extract `tcgplayer.retail`, `cardkingdom.buylist` (+ `1.30x` credit fallback), and `manapool.retail` across `normal`, `foil`, and `etched`.
+  4. Supplement any missing Mana Pool `normal`/`foil`/`etched` prices from Mana Pool's public singles JSON stream (`https://manapool.com/api/v1/prices/singles`, with optional `--skip-manapool` flag and graceful non-fatal fallback if unreachable).
+  5. Bulk upsert/update PostgreSQL `card_catalog` in batches of 5,000 rows (`ON CONFLICT (scryfall_id) DO UPDATE`) and prune expired rows from `sku_price_cache` (`expires_at <= NOW()`).
