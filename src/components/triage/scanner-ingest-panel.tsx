@@ -2,7 +2,9 @@
 
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
+  Database,
   Download,
   FileUp,
   Loader2,
@@ -23,11 +25,14 @@ interface ScannerIngestPanelProps {
   isIngesting: boolean;
   diagnostics: TriageDiagnostics | null;
   errorMessage: string | null;
+  isFullCatalog: boolean;
+  catalogCount: number;
   onSelectPreset: (preset: DemoScannerPreset) => Promise<void>;
   onUploadCsvText: (params: {
     csvText: string;
     filename?: string;
   }) => Promise<void>;
+  onRequestFullCatalogSync?: () => void;
 }
 
 export function ScannerIngestPanel({
@@ -35,8 +40,11 @@ export function ScannerIngestPanel({
   isIngesting,
   diagnostics,
   errorMessage,
+  isFullCatalog,
+  catalogCount,
   onSelectPreset,
   onUploadCsvText,
+  onRequestFullCatalogSync,
 }: ScannerIngestPanelProps): React.ReactElement {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -212,6 +220,40 @@ export function ScannerIngestPanel({
         </div>
       )}
 
+      {/* Demo-catalog guidance before / after a personal CSV miss */}
+      {!isFullCatalog && (
+        <div
+          role="status"
+          className="mt-3 flex flex-wrap items-start justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-100"
+        >
+          <div className="flex max-w-3xl items-start gap-2">
+            <Database className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+            <div>
+              <p className="font-semibold text-amber-100">
+                Demo catalog only ({catalogCount.toLocaleString("en-US")}{" "}
+                printings) — personal ManaBox / Dragon Shield CSVs will resolve
+                as <span className="font-mono">catalog_not_found</span> until
+                you sync.
+              </p>
+              <p className="mt-0.5 text-[11px] text-amber-200/85">
+                Built-in presets still work. For a real Whole Collection export,
+                click <strong>Sync Full 100k+ Catalog</strong> first, then
+                re-upload.
+              </p>
+            </div>
+          </div>
+          {onRequestFullCatalogSync && (
+            <button
+              type="button"
+              onClick={onRequestFullCatalogSync}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-amber-400"
+            >
+              Sync Full Catalog
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Resolution & 95% Local DB vs 5% Pro SKU Cache Diagnostics Bar */}
       {diagnostics && (
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800/90 bg-slate-950/80 px-3.5 py-2 text-xs">
@@ -250,6 +292,9 @@ export function ScannerIngestPanel({
             {diagnostics.unresolvedRowCount > 0 && (
               <span className="rounded border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 font-medium text-amber-300">
                 {diagnostics.unresolvedRowCount} Unresolved
+                {diagnostics.catalogNotFoundCount > 0
+                  ? ` (${diagnostics.catalogNotFoundCount} catalog_not_found)`
+                  : ""}
               </span>
             )}
             {diagnostics.skippedRowCount > 0 && (
@@ -258,6 +303,16 @@ export function ScannerIngestPanel({
               </span>
             )}
           </div>
+
+          {diagnostics.catalogGuidance && (
+            <div
+              role="alert"
+              className="flex w-full items-start gap-2 border-t border-amber-500/30 pt-2 text-[11px] text-amber-100"
+            >
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+              <span>{diagnostics.catalogGuidance}</span>
+            </div>
+          )}
 
           {diagnostics.unresolvedRows.length > 0 && (
             <div className="w-full border-t border-slate-800 pt-2 text-[11px] text-amber-200/90">

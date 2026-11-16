@@ -908,8 +908,13 @@ export function TriageWorkspace({
           isIngesting={isIngesting}
           diagnostics={diagnostics}
           errorMessage={ingestError}
+          isFullCatalog={catalogSync.isFullCatalog}
+          catalogCount={catalogSync.catalogCount}
           onSelectPreset={handleSelectPreset}
           onUploadCsvText={handleUploadCsvText}
+          onRequestFullCatalogSync={() => {
+            void handleStartCatalogSync("full");
+          }}
         />
 
         {/* Main Workspace Grid: Left Sliders + Right 4-Pile Table */}

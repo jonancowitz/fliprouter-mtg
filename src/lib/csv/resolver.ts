@@ -174,8 +174,20 @@ export function createDrizzleCatalogLookup(
       if (ids.length === 0) {
         return [];
       }
+      // Normalize to lowercase UUID text — Postgres/PGlite uuid compares
+      // case-insensitively, but callers/CSV paths may pass mixed case.
+      const normalized = [
+        ...new Set(
+          ids
+            .map((id) => id.trim().toLowerCase())
+            .filter((id) => id.length > 0),
+        ),
+      ];
+      if (normalized.length === 0) {
+        return [];
+      }
       const results: CardCatalogItem[] = [];
-      for (const batch of chunkArray(ids, ID_BATCH_SIZE)) {
+      for (const batch of chunkArray(normalized, ID_BATCH_SIZE)) {
         const found = (await db
           .select()
           .from(cardCatalog)
