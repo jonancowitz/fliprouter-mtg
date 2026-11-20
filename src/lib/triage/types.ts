@@ -67,6 +67,7 @@ export interface TriageDiagnostics {
   totalResolvedRows: number;
   totalResolvedCards: number;
   unresolvedRowCount: number;
+  catalogNotFoundCount: number;
   skippedRowCount: number;
   localDbOnlyCount: number;
   freshSkuCacheHitCount: number;
@@ -76,6 +77,15 @@ export interface TriageDiagnostics {
   matchStrategyCounts: Partial<Record<CatalogMatchStrategy, number>>;
   unresolvedRows: UnresolvedRowSummary[];
   skippedRows: SkippedCsvRow[];
+  /** Live `card_catalog` row count at ingest time. */
+  catalogCount: number;
+  /** True when catalog has been synced past the demo seed threshold. */
+  isFullCatalog: boolean;
+  /**
+   * Fail-soft guidance when unresolved rows are almost certainly caused by a
+   * demo-sized catalog (user has not run Sync Full Catalog yet).
+   */
+  catalogGuidance: string | null;
 }
 
 export interface SerializedVendorShipment {

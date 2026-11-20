@@ -102,7 +102,7 @@ export function CatalogSyncBanner({
             <p className="mt-0.5 text-[11px] text-slate-400">
               {sync.isFullCatalog
                 ? "95% Local DB Rule active: Scryfall default_cards + MTGJSON AllPricesToday + Card Kingdom buylist + Mana Pool NM singles."
-                : "Sync the full 100k+ Scryfall + MTGJSON + Mana Pool catalog into local PGlite to resolve any personal or friend collection CSV."}
+                : "Required before real ManaBox / Dragon Shield / TCGplayer CSVs: sync the full 100k+ Scryfall + MTGJSON + Mana Pool catalog. Until then only the 44-card demo presets resolve — personal Whole Collection exports will show catalog_not_found."}
             </p>
           </div>
         </div>

@@ -20,6 +20,8 @@ import {
   lotItems,
   userRoutingProfiles,
 } from "@/db/schema";
+import { getCatalogCount } from "@/db/seed-demo";
+import { FULL_CATALOG_MIN_THRESHOLD } from "@/lib/catalog";
 import {
   fetchFreshSkuPriceCacheMap,
   makeSkuPriceCacheKey,
@@ -561,6 +563,39 @@ export async function upsertUserRoutingProfile(
   return updated ?? merged;
 }
 
+/**
+ * Fail-soft copy when a personal scanner CSV mostly hits `catalog_not_found`
+ * against the 44-card demo seed (full sync not run yet).
+ */
+export function buildDemoCatalogGuidance(params: {
+  catalogCount: number;
+  isFullCatalog: boolean;
+  totalParsedRows: number;
+  resolvedRows: number;
+  catalogNotFoundCount: number;
+}): string | null {
+  if (params.isFullCatalog) {
+    return null;
+  }
+  if (params.totalParsedRows === 0 || params.catalogNotFoundCount === 0) {
+    return null;
+  }
+  // Demo catalog miss: any catalog_not_found while still under the full-catalog
+  // threshold means the user needs Sync Full Catalog for real collections.
+  const unresolvedMajority =
+    params.catalogNotFoundCount >= Math.max(1, Math.ceil(params.totalParsedRows / 2)) ||
+    params.resolvedRows === 0;
+  if (!unresolvedMajority) {
+    return null;
+  }
+  return (
+    `Local catalog has only ${params.catalogCount.toLocaleString("en-US")} demo printings ` +
+    `(need ${FULL_CATALOG_MIN_THRESHOLD.toLocaleString("en-US")}+ for personal CSVs). ` +
+    `Click "Sync Full 100k+ Catalog" (or run npm run catalog:sync), then re-upload. ` +
+    `Demo presets still resolve against the starter seed.`
+  );
+}
+
 export async function ingestAndRouteScannerCsv(
   db: Database,
   params: {
@@ -611,6 +646,18 @@ export async function ingestAndRouteScannerCsv(
   }
 
   const resolution = await resolveParsedCsvRows(parsed.rows, db);
+  const catalogCount = await getCatalogCount(db);
+  const isFullCatalog = catalogCount >= FULL_CATALOG_MIN_THRESHOLD;
+  const catalogNotFoundCount = resolution.unresolved.filter(
+    (u) => u.reason === "catalog_not_found",
+  ).length;
+  const catalogGuidance = buildDemoCatalogGuidance({
+    catalogCount,
+    isFullCatalog,
+    totalParsedRows: parsed.rows.length,
+    resolvedRows: resolution.stats.resolvedRows,
+    catalogNotFoundCount,
+  });
   const skuCacheMap = await fetchFreshSkuPriceCacheMap(
     db,
     resolution.resolved,
@@ -727,6 +774,7 @@ export async function ingestAndRouteScannerCsv(
     totalResolvedRows: resolution.stats.resolvedRows,
     totalResolvedCards: resolution.stats.totalResolvedCards,
     unresolvedRowCount: resolution.stats.unresolvedRows,
+    catalogNotFoundCount,
     skippedRowCount: parsed.skippedRows.length,
     localDbOnlyCount,
     freshSkuCacheHitCount,
@@ -743,6 +791,9 @@ export async function ingestAndRouteScannerCsv(
       attemptedStrategies: u.attemptedStrategies,
     })),
     skippedRows: parsed.skippedRows,
+    catalogCount,
+    isFullCatalog,
+    catalogGuidance,
   };
 
   return {
